@@ -149,7 +149,7 @@ class PipelineManager:
         sync_result = self.manifest.sync_tasks(samples)
         print(f"Discovered {len(samples)} sample(s), new={sync_result['new']}, refreshed={sync_result['refreshed']}.")
         discovered_ids = {sample["sample_id"] for sample in samples}
-        return [sample for sample in self.manifest.pending_samples() if sample["sample_id"] in discovered_ids]
+        return self.manifest.pending_samples(sample_ids=discovered_ids)
 
     def run(self) -> dict[str, int]:
         pending_samples = self.prepare()
