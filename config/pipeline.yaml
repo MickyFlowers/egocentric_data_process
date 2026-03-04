@@ -1,0 +1,59 @@
+defaults:
+  - _self_
+
+data:
+  type: database_loader
+  params:
+    dataset_name: "Ego4d"
+    database_url: "http://192.168.3.208:54321"
+    database_key: "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+    database_table: "egocentric_dataset_clips"
+    mnt_dir: "/home"
+    
+runtime:
+  manifest_path: ./workspace/manifest.json
+  num_workers: 4
+  limit: null
+  recover_in_progress: true
+  ray:
+    address: null
+    init:
+      ignore_reinit_error: true
+    worker:
+      num_cpus: 1
+      num_gpus: 0
+      resources: {}
+
+processes:
+  - name: inject_dataset_tag
+    type: add_fields
+    enabled: true
+    params:
+      fields:
+        dataset: ego_demo
+
+  - name: write_metadata
+    type: write_metadata_json
+    enabled: true
+    params:
+      output_dir: ./workspace/metadata
+      suffix: .meta
+      extension: .json
+      include_keys:
+        - sample_id
+        - input_path
+        - relative_path
+        - dataset
+      indent: 2
+
+  - name: copy_media
+    type: copy_input_file
+    enabled: true
+    params:
+      output_dir: ./workspace/media
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ./workspace/hydra/${now:%Y-%m-%d_%H-%M-%S}
