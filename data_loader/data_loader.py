@@ -206,12 +206,9 @@ class DatabaseDataLoader(BaseDataLoader):
             print("Fetched {} samples from database".format(start))
             sample = [
                 {
-                    "video_path": oss_to_local(
-                        response.data[i]["path"],
-                    ),
-                    "data_path": oss_to_local(
-                        response.data[i]['path'].replace(".mp4", ".pose3d_hand")
-                    )
+                    "video_path": response.data[i]["path"],
+                    "data_path": response.data[i]['path'].replace(".mp4", ".pose3d_hand"),
+                    "sample_id": response.data[i]["path"].replace(".mp4", ""),
                 }
                 for i in range(len(response.data))
             ]

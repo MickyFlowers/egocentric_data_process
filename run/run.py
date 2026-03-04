@@ -16,6 +16,7 @@ from process.process import build_pipeline
 from utils.manifest import ManifestStore
 from utils.oss_utils import oss_to_local
 from utils.pipeline_context import PipelineContext
+from utils.progress import build_progress_bar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,6 +50,7 @@ class RuntimeSettings:
     num_workers: int
     limit: int | None
     recover_in_progress: bool
+    show_progress: bool
     ray_address: str | None
     ray_init_kwargs: dict[str, Any]
     ray_worker_options: dict[str, Any]
@@ -82,6 +84,7 @@ class PipelineManager:
         config["runtime"].setdefault("num_workers", os.cpu_count() or 1)
         config["runtime"].setdefault("limit", None)
         config["runtime"].setdefault("recover_in_progress", True)
+        config["runtime"].setdefault("show_progress", True)
         config["runtime"].setdefault("ray", {})
         config["runtime"]["ray"].setdefault("address", None)
         config["runtime"]["ray"].setdefault("init", {})
@@ -113,6 +116,7 @@ class PipelineManager:
         num_workers = int(runtime_config.get("num_workers", os.cpu_count() or 1))
         limit = runtime_config.get("limit")
         recover_in_progress = bool(runtime_config.get("recover_in_progress", True))
+        show_progress = bool(runtime_config.get("show_progress", True))
         ray_worker_options = dict(ray_config.get("worker", {}))
         if ray_worker_options.get("resources") is None:
             ray_worker_options.pop("resources", None)
@@ -123,6 +127,7 @@ class PipelineManager:
             num_workers=max(1, num_workers),
             limit=None if limit is None else int(limit),
             recover_in_progress=recover_in_progress,
+            show_progress=show_progress,
             ray_address=ray_config.get("address"),
             ray_init_kwargs=dict(ray_config.get("init", {})),
             ray_worker_options=ray_worker_options,
@@ -199,6 +204,13 @@ class PipelineManager:
         inflight: dict[Any, dict[str, Any]] = {}
         sample_iter = iter(pending_samples)
         next_actor_index = 0
+        status_counts = {"completed": 0, "failed": 0, "skipped": 0}
+        progress_bar = build_progress_bar(
+            enabled=self.runtime.show_progress,
+            total=len(pending_samples),
+            desc="Processing",
+            unit="sample",
+        )
 
         def schedule_next() -> None:
             nonlocal next_actor_index
@@ -213,20 +225,33 @@ class PipelineManager:
                 inflight[ref] = sample
 
         schedule_next()
-        while inflight:
-            done_refs, _ = ray.wait(list(inflight), num_returns=1)
-            done_ref = done_refs[0]
-            sample = inflight.pop(done_ref)
-            try:
-                result = ray.get(done_ref)
-            except Exception as exc:
-                result = {
-                    "sample_id": sample["sample_id"],
-                    "status": "failed",
-                    "error": f"Ray execution failed: {exc}",
-                }
-            results.append(result)
-            schedule_next()
+        try:
+            while inflight:
+                done_refs, _ = ray.wait(list(inflight), num_returns=1)
+                done_ref = done_refs[0]
+                sample = inflight.pop(done_ref)
+                try:
+                    result = ray.get(done_ref)
+                except Exception as exc:
+                    result = {
+                        "sample_id": sample["sample_id"],
+                        "status": "failed",
+                        "error": f"Ray execution failed: {exc}",
+                    }
+                results.append(result)
+                status = result.get("status", "failed")
+                status_counts.setdefault(status, 0)
+                status_counts[status] += 1
+                progress_bar.update(1)
+                progress_bar.set_postfix(
+                    completed=status_counts.get("completed", 0),
+                    failed=status_counts.get("failed", 0),
+                    skipped=status_counts.get("skipped", 0),
+                )
+                progress_bar.refresh()
+                schedule_next()
+        finally:
+            progress_bar.close()
 
         return results
 

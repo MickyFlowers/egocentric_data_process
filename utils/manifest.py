@@ -72,7 +72,7 @@ class ManifestStore:
         with self._locked_state() as state:
             tasks = state.setdefault("tasks", {})
             for sample in samples:
-                sample_id = sample["data_path"]
+                sample_id = sample["sample_id"]
                 if sample_id not in tasks:
                     tasks[sample_id] = {
                         "status": "pending",
