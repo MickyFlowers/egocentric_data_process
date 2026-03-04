@@ -1,0 +1,12 @@
+manifest_path: ./manifest.json
+num_workers: 4
+limit: null
+recover_in_progress: true
+ray:
+  address: null
+  init:
+    ignore_reinit_error: true
+  worker:
+    num_cpus: 1
+    num_gpus: 0
+    resources: {}

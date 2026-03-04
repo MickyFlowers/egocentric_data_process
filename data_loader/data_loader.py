@@ -11,7 +11,9 @@ from utils.oss_utils import oss_to_local
 DATA_LOADER_REGISTRY: dict[str, type["BaseDataLoader"]] = {}
 
 
-def register_data_loader(name: str) -> Callable[[type["BaseDataLoader"]], type["BaseDataLoader"]]:
+def register_data_loader(
+    name: str,
+) -> Callable[[type["BaseDataLoader"]], type["BaseDataLoader"]]:
     def decorator(loader_cls: type["BaseDataLoader"]) -> type["BaseDataLoader"]:
         if name in DATA_LOADER_REGISTRY:
             raise ValueError(f"data loader '{name}' is already registered")
@@ -62,7 +64,11 @@ class BaseDataLoader:
         sample = {
             "sample_id": sample_id or relative_path,
             "input_path": str(resolved_path),
-            "input_oss_path": local_to_oss(str(resolved_path)) if str(resolved_path).startswith("/home/") else None,
+            "input_oss_path": (
+                local_to_oss(str(resolved_path))
+                if str(resolved_path).startswith("/home/")
+                else None
+            ),
             "relative_path": relative_path,
             "stem": resolved_path.stem,
             "extension": resolved_path.suffix,
@@ -93,7 +99,9 @@ class GlobDataLoader(BaseDataLoader):
             raise FileNotFoundError(f"input_root does not exist: {input_root}")
 
         input_glob = self.params.get("input_glob", "**/*")
-        extensions = [extension.lower() for extension in self.params.get("extensions", [])]
+        extensions = [
+            extension.lower() for extension in self.params.get("extensions", [])
+        ]
 
         samples: list[dict[str, Any]] = []
         for path in sorted(input_root.glob(input_glob)):
@@ -111,14 +119,18 @@ class JsonListDataLoader(BaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
         samples_path_value = self.params.get("samples_path")
         if not samples_path_value:
-            raise ValueError("data.params.samples_path is required for json_list data loader")
+            raise ValueError(
+                "data.params.samples_path is required for json_list data loader"
+            )
 
         samples_path = self.resolve_path(samples_path_value)
         if not samples_path.exists():
             raise FileNotFoundError(f"samples_path does not exist: {samples_path}")
 
         relative_root_value = self.params.get("relative_root")
-        relative_root = self.resolve_path(relative_root_value) if relative_root_value else None
+        relative_root = (
+            self.resolve_path(relative_root_value) if relative_root_value else None
+        )
         file_format = self.params.get("format")
 
         if file_format == "jsonl" or samples_path.suffix.lower() == ".jsonl":
@@ -152,7 +164,11 @@ class JsonListDataLoader(BaseDataLoader):
                 input_path,
                 input_root=relative_root,
                 sample_id=row.get("sample_id"),
-                extra_fields={key: value for key, value in row.items() if key not in {"sample_id", "input_path"}},
+                extra_fields={
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"sample_id", "input_path"}
+                },
             )
             if "relative_path" in row:
                 sample["relative_path"] = str(row["relative_path"])
@@ -161,6 +177,7 @@ class JsonListDataLoader(BaseDataLoader):
             samples.append(sample)
 
         return samples
+
 
 @register_data_loader("database_loader")
 class DatabaseDataLoader(BaseDataLoader):
@@ -171,6 +188,7 @@ class DatabaseDataLoader(BaseDataLoader):
         table_name = self.params.get("database_table")
         database: Client = create_client(database_url, database_key)
         start = 0
+        samples: list[dict[str, Any]] = []
         while True:
             response = (
                 database.table(table_name)
@@ -185,5 +203,18 @@ class DatabaseDataLoader(BaseDataLoader):
             if len(response.data) == 0:
                 break
             start += len(response.data)
-    
+            print("Fetched {} samples from database".format(start))
+            sample = [
+                {
+                    "video_path": oss_to_local(
+                        response.data[i]["path"],
+                    ),
+                    "data_path": oss_to_local(
+                        response.data[i]['path'].replace(".mp4", ".pose3d_hand")
+                    )
+                }
+                for i in range(len(response.data))
+            ]
+            samples.extend(sample)
+        return samples
             

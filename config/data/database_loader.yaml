@@ -1,0 +1,7 @@
+type: database_loader
+params:
+  dataset_name: "Ego4d"
+  database_url: "http://192.168.3.208:54321"
+  database_key: "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+  database_table: "egocentric_dataset_clips"
+  # mnt_dir: "/home"

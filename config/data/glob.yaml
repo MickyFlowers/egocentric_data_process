@@ -1,0 +1,8 @@
+type: glob
+params:
+  input_root: ./demo_inputs
+  input_glob: "**/*"
+  extensions:
+    - .mp4
+    - .mov
+    - .json

@@ -207,7 +207,6 @@ class PipelineManager:
                     sample = next(sample_iter)
                 except StopIteration:
                     break
-
                 actor = actors[next_actor_index % len(actors)]
                 next_actor_index += 1
                 ref = actor.process_sample.remote(sample)
