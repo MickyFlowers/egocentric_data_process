@@ -34,15 +34,21 @@ def get_path_mapping() -> dict[str, str]:
 
 def oss_to_local(oss_path: str, mnt_path: str | None = None, oss_prefix: str | None = None) -> str:
     if not oss_path.startswith("oss://"):
-        return str(Path(oss_path).expanduser().resolve())
+        # Keep non-OSS paths stable and avoid binding to current runtime cwd.
+        return str(Path(oss_path).expanduser())
 
-    local_mount = str(Path(mnt_path or _PATH_MAPPING["local_mount"]).expanduser().resolve()).rstrip("/")
+    local_mount_path = Path(mnt_path or _PATH_MAPPING["local_mount"]).expanduser()
+    if not local_mount_path.is_absolute():
+        raise ValueError(
+            f"local_mount must be absolute to avoid runtime-dir dependent paths: {local_mount_path}"
+        )
+    local_mount = str(local_mount_path).rstrip("/")
     normalized_prefix = _normalize_oss_prefix(oss_prefix or _PATH_MAPPING["oss_prefix"])
     if not oss_path.startswith(normalized_prefix):
         raise ValueError(f"oss_path does not start with configured oss_prefix: {oss_path}")
 
     relative_path = oss_path[len(normalized_prefix) :].lstrip("/")
-    return str((Path(local_mount) / relative_path).resolve())
+    return str(Path(local_mount) / relative_path)
 
 
 def local_to_oss(local_path: str, mnt_path: str | None = None, oss_prefix: str | None = None) -> str:

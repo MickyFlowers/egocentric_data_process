@@ -71,6 +71,20 @@ def _join_remote_path(remote_root: str, relative_path: Path) -> str:
     return f"{normalized_remote_root}/{relative_value}"
 
 
+def _configure_path_mapping_from_runtime(project_root: Path, raw_config: dict[str, Any]) -> None:
+    path_mapping_config = dict(raw_config.get("runtime", {}).get("path_mapping", {}))
+    local_mount_value = path_mapping_config.get("local_mount", str(project_root))
+    if not isinstance(local_mount_value, str) or not local_mount_value:
+        local_mount_value = str(project_root)
+    local_mount = resolve_config_path(project_root, local_mount_value)
+
+    oss_prefix_value = path_mapping_config.get("oss_prefix", "oss://")
+    if not isinstance(oss_prefix_value, str) or not oss_prefix_value:
+        oss_prefix_value = "oss://"
+
+    configure_path_mapping(str(local_mount), oss_prefix_value)
+
+
 @dataclass
 class RuntimeSettings:
     manifest_path: Path
@@ -137,6 +151,7 @@ class PipelineManager:
         config["data"].setdefault("type", "glob")
         config["data"].setdefault("params", {})
         config["data"]["_config_root"] = str(self.project_root)
+        config["data"]["_path_mapping"] = dict(config["runtime"].get("path_mapping", {}))
         config.setdefault("processes", [])
         config["_config_root"] = str(self.project_root)
         for process_config in config["processes"]:
@@ -144,15 +159,7 @@ class PipelineManager:
         return config
 
     def _configure_path_mapping(self) -> None:
-        path_mapping_config = self.raw_config.get("runtime", {}).get("path_mapping", {})
-        local_mount = resolve_config_path(
-            self.project_root,
-            path_mapping_config.get("local_mount", str(self.project_root)),
-        )
-        configure_path_mapping(
-            str(local_mount),
-            path_mapping_config.get("oss_prefix", "oss://"),
-        )
+        _configure_path_mapping_from_runtime(self.project_root, self.raw_config)
 
     def _build_runtime_settings(self) -> RuntimeSettings:
         runtime_config = self.raw_config.get("runtime", {})
@@ -467,8 +474,10 @@ class PipelineWorker:
     def __init__(self, config: dict[str, Any], worker_index: int = 0) -> None:
         self.config = config
         self.worker_index = worker_index
+        config_root = Path(str(config.get("_config_root", PROJECT_ROOT))).resolve()
+        _configure_path_mapping_from_runtime(config_root, config)
         self.pipeline = build_pipeline(config.get("processes", []))
-        manifest_path = resolve_config_path(Path(config["_config_root"]), config["runtime"]["manifest_path"])
+        manifest_path = resolve_config_path(config_root, config["runtime"]["manifest_path"])
         self.manifest = ManifestStore(manifest_path)
 
     def process_sample(self, sample: dict[str, Any]) -> dict[str, Any]:

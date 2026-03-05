@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from utils.oss_utils import ensure_oss_path, oss_to_local
+from utils.oss_utils import configure_path_mapping
 
 try:
     from supabase import create_client, Client
@@ -36,12 +37,32 @@ class BaseDataLoader:
         self.config = config or {}
         self.params = dict(self.config.get("params", {}))
         self._config_root = Path(self.config.get("_config_root", ".")).resolve()
+        self._configure_path_mapping()
 
     def __call__(self) -> list[dict[str, Any]]:
         return self.load()
 
     def load(self) -> list[dict[str, Any]]:
         raise NotImplementedError
+
+    def _configure_path_mapping(self) -> None:
+        mapping = self.config.get("_path_mapping")
+        if not isinstance(mapping, dict):
+            return
+
+        local_mount_value = mapping.get("local_mount")
+        if not isinstance(local_mount_value, str) or not local_mount_value:
+            return
+        local_mount = Path(local_mount_value).expanduser()
+        if not local_mount.is_absolute():
+            local_mount = (self._config_root / local_mount).resolve()
+        else:
+            local_mount = local_mount.resolve()
+
+        oss_prefix = mapping.get("oss_prefix", "oss://")
+        if not isinstance(oss_prefix, str) or not oss_prefix:
+            oss_prefix = "oss://"
+        configure_path_mapping(str(local_mount), oss_prefix)
 
 
 def build_data_loader(loader_config: dict[str, Any]) -> BaseDataLoader:
