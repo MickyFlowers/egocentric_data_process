@@ -1,0 +1,8 @@
+type: glob
+params:
+  input_dir: ./examples
+  input_glob: "**/*"
+  extensions:
+    - .mp4
+    - .mov
+    - .json

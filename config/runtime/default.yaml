@@ -1,8 +1,12 @@
 manifest_path: ./manifest.json
 num_workers: 4
 limit: null
+resume: false
 recover_in_progress: true
 show_progress: true
+path_mapping:
+  local_mount: .
+  oss_prefix: oss://
 ray:
   address: null
   init:

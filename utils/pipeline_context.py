@@ -45,10 +45,10 @@ class PipelineContext:
         with self.staged_output(final_path) as temp_path:
             shutil.copy2(source_path, temp_path)
 
-    def write_json(self, final_path: str, payload: Any, indent: int = 2) -> None:
+    def write_json(self, final_path: str, payload: Any, indent: int = 2, *, sort_keys: bool = True) -> None:
         with self.staged_output(final_path) as temp_path:
             with open(temp_path, "w", encoding="utf-8") as file_obj:
-                json.dump(payload, file_obj, ensure_ascii=False, indent=indent, sort_keys=True)
+                json.dump(payload, file_obj, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
 
     def cleanup(self) -> None:
         cleanup_paths = sorted(self._cleanup_paths | self._temp_paths, reverse=True)

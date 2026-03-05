@@ -3,3 +3,6 @@ __pycache__/
 workspace/
 manifest.json
 
+examples/
+
+outputs/

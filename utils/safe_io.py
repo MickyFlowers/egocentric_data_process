@@ -17,7 +17,10 @@ def build_temp_path(final_path: str | Path, temp_dir: str | Path | None = None) 
     base_dir = Path(temp_dir).expanduser() if temp_dir else final_path.parent
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    temp_name = f".{final_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    if final_path.suffix:
+        temp_name = f".{final_path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp{final_path.suffix}"
+    else:
+        temp_name = f".{final_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     return str((base_dir / temp_name).resolve())
 
 
@@ -52,11 +55,11 @@ def atomic_write_text(final_path: str | Path, content: str, encoding: str = "utf
         raise
 
 
-def atomic_write_json(final_path: str | Path, payload: Any, indent: int = 2) -> None:
+def atomic_write_json(final_path: str | Path, payload: Any, indent: int = 2, *, sort_keys: bool = True) -> None:
     temp_path = build_temp_path(final_path)
     try:
         with open(temp_path, "w", encoding="utf-8") as file_obj:
-            json.dump(payload, file_obj, ensure_ascii=False, indent=indent, sort_keys=True)
+            json.dump(payload, file_obj, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
         commit_temp_path(temp_path, final_path)
     except Exception:
         remove_path(temp_path)

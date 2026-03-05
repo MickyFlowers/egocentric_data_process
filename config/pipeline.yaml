@@ -1,7 +1,7 @@
 defaults:
   - data: database_loader
   - runtime: default
-  - processes: default
+  - processes: process
   - _self_
 
 hydra:

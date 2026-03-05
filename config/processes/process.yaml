@@ -1,0 +1,112 @@
+- name: load_data
+  type: load_data
+  enabled: true
+  params:
+    output_dir: &shared_output_dir
+      local: ./outputs
+      remote: ./outputs
+    mano_model_dir: ./assets/mano_v1_2/models
+    device: cpu
+    use_pca: false
+    flat_hand_mean: true
+    fix_shapedirs: true
+
+- name: retarget
+  type: retarget
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    axis_length: 0.03
+    workspace_center: [0.25, 0.0, 0.4]
+    camera_elevation_deg: 45.0
+    use_ekf: true
+    ekf:
+      edge_pad: 24
+      q_pos: 120.0
+      q_rot: 120.0
+      r_pos: 2.0e-3
+      r_rot: 4.0e-3
+      innovation_gate_pos: null
+      innovation_gate_rot: 1.2
+      outlier_noise_scale: 1.0e6
+      rotvec_wrap_count: 2
+    left_base_translation: [0.0, 0.3, 0.0]
+    right_base_translation: [0.0, -0.3, 0.0]
+    indent: 2
+- name: inverse_kinematics
+  type: inverse_kinematics
+  enabled: true
+  params:
+    urdf_path: ./assets/aloha_new_description/urdf/dual_piper.urdf
+    package_dirs:
+      - ./assets
+    output_dir: *shared_output_dir
+    indent: 8
+    solver:
+      position_weight: 8.0
+      orientation_weight: 1.0
+      continuity_weight: 0.05
+      damping: 1.0e-4
+      max_iterations: 64
+      max_joint_step: 0.15
+      max_frame_delta: 0.35
+      position_tolerance: 0.01
+      orientation_tolerance: 0.3
+      collision:
+        enabled: false
+        required: false
+        weight: 5.0
+        safe_distance: 0.01
+        check_interval: 2
+    sides:
+      left:
+        base_frame: left_base_link
+        ee_frame: left_tcp
+        joint_names: [left_joint1, left_joint2, left_joint3, left_joint4, left_joint5, left_joint6]
+      right:
+        base_frame: right_base_link
+        ee_frame: right_tcp
+        joint_names: [right_joint1, right_joint2, right_joint3, right_joint4, right_joint5, right_joint6]
+
+- name: write_data
+  type: write_data
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    compression: snappy
+    metadata_indent: 2
+    metadata_sort_keys: true
+
+- name: visualize
+  type: visualize
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    strict: false
+    hand: {}
+    eef:
+      axis_length: 0.03
+      left_base_translation: [0.0, 0.3, 0.0]
+      right_base_translation: [0.0, -0.3, 0.0]
+    ik:
+      urdf_path: ./assets/aloha_new_description/urdf/dual_piper.urdf
+      package_dirs:
+        - ./assets
+      ik_mesh_render: false
+      ik_visualization_width: 960
+      ik_visualization_height: 540
+      ik_visualization_fov_deg: 42.0
+      ik_visualization_camera_eye: [1.1, -0.05, 0.8]
+      ik_visualization_camera_target: [0.0, 0.0, 0.15]
+      ik_visualization_camera_up: [0.0, 0.0, 1.0]
+      ik_target_axis_length: 0.04
+      ik_target_marker_radius: 0.015
+      sides:
+        left:
+          base_frame: left_base_link
+          ee_frame: left_tcp
+          joint_names: [left_joint1, left_joint2, left_joint3, left_joint4, left_joint5, left_joint6]
+        right:
+          base_frame: right_base_link
+          ee_frame: right_tcp
+          joint_names: [right_joint1, right_joint2, right_joint3, right_joint4, right_joint5, right_joint6]

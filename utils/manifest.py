@@ -316,6 +316,57 @@ class ManifestStore:
                 ("pending", _json_dump([]), _json_dump([]), utc_now(), last_error, sample_id),
             )
 
+    def reset_samples(
+        self,
+        sample_ids: Iterable[str],
+        *,
+        cleanup_artifacts: bool = True,
+        last_error: str | None = None,
+    ) -> int:
+        ids = list(dict.fromkeys(sample_ids))
+        if not ids:
+            return 0
+
+        cleanup_paths: list[str] = []
+        if cleanup_artifacts:
+            for batch in _batched(ids, 500):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self._conn.execute(
+                    f"SELECT artifacts, temp_artifacts FROM tasks WHERE sample_id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                for row in rows:
+                    cleanup_paths.extend(_json_load(row["artifacts"], []))
+                    cleanup_paths.extend(_json_load(row["temp_artifacts"], []))
+
+        timestamp = utc_now()
+        with self._conn:
+            for batch in _batched(ids, 500):
+                placeholders = ",".join("?" for _ in batch)
+                self._conn.execute(
+                    f"""
+                    UPDATE tasks
+                    SET status = ?,
+                        worker = NULL,
+                        artifacts = ?,
+                        temp_artifacts = ?,
+                        attempts = 0,
+                        started_at = NULL,
+                        completed_at = NULL,
+                        summary = NULL,
+                        updated_at = ?,
+                        last_error = ?
+                    WHERE sample_id IN ({placeholders})
+                    """,
+                    ("pending", _json_dump([]), _json_dump([]), timestamp, last_error, *batch),
+                )
+
+        if cleanup_artifacts:
+            for path in sorted(set(cleanup_paths), reverse=True):
+                remove_path(path)
+
+        return len(ids)
+
     def pending_samples(self, sample_ids: set[str] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         query = "SELECT payload FROM tasks WHERE status = ?"
         params: list[Any] = ["pending"]
@@ -347,6 +398,29 @@ class ManifestStore:
             params.append(limit)
         rows = self._conn.execute(query, tuple(params)).fetchall()
         return [_json_load(row["payload"], {}) for row in rows]
+
+    def get_payloads(self, sample_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        payloads: dict[str, dict[str, Any]] = {}
+        ids = list(sample_ids)
+        if not ids:
+            return payloads
+
+        for batch in _batched(ids, 500):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT sample_id, payload FROM tasks WHERE sample_id IN ({placeholders})",
+                tuple(batch),
+            ).fetchall()
+            for row in rows:
+                payloads[row["sample_id"]] = _json_load(row["payload"], {})
+        return payloads
+
+    def completed_sample_ids(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT sample_id FROM tasks WHERE status = ? ORDER BY sample_id",
+            ("completed",),
+        ).fetchall()
+        return [str(row["sample_id"]) for row in rows]
 
     def summary(self) -> dict[str, int]:
         counts = {"pending": 0, "in_progress": 0, "completed": 0}

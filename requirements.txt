@@ -1,0 +1,19 @@
+ray
+hydra-core
+supabase
+numpy
+scipy
+torch
+imageio
+imageio-ffmpeg
+opencv-python
+pyarrow
+chumpy==0.70
+manopth @ git+https://github.com/hassony2/manopth.git
+
+# Optional dependencies for inverse_kinematics process (Pinocchio backend).
+# Install from conda-forge for better binary compatibility:
+#   conda install -c conda-forge pinocchio hpp-fcl
+#
+# Optional dependencies for IK mesh visualization (fallback to skeleton render if missing):
+#   pip install trimesh pyrender

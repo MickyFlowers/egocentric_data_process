@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
-from utils.oss_utils import local_to_oss, oss_to_local
 from supabase import create_client, Client
-from utils.oss_utils import oss_to_local
+from utils.oss_utils import ensure_oss_path, oss_to_local
 
 DATA_LOADER_REGISTRY: dict[str, type["BaseDataLoader"]] = {}
 
@@ -30,7 +29,6 @@ class BaseDataLoader:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
         self.params = dict(self.config.get("params", {}))
-        self.name = self.config.get("name", self.loader_type)
         self._config_root = Path(self.config.get("_config_root", ".")).resolve()
 
     def __call__(self) -> list[dict[str, Any]]:
@@ -38,44 +36,6 @@ class BaseDataLoader:
 
     def load(self) -> list[dict[str, Any]]:
         raise NotImplementedError
-
-    def resolve_path(self, path_value: str) -> Path:
-        if path_value.startswith("oss://"):
-            return Path(oss_to_local(path_value)).resolve()
-
-        path = Path(path_value)
-        if path.is_absolute():
-            return path.resolve()
-        return (self._config_root / path_value).resolve()
-
-    def build_sample(
-        self,
-        path: Path,
-        input_root: Path | None = None,
-        sample_id: str | None = None,
-        extra_fields: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        resolved_path = path.resolve()
-        if input_root is not None:
-            relative_path = resolved_path.relative_to(input_root.resolve()).as_posix()
-        else:
-            relative_path = path.name
-
-        sample = {
-            "sample_id": sample_id or relative_path,
-            "input_path": str(resolved_path),
-            "input_oss_path": (
-                local_to_oss(str(resolved_path))
-                if str(resolved_path).startswith("/home/")
-                else None
-            ),
-            "relative_path": relative_path,
-            "stem": resolved_path.stem,
-            "extension": resolved_path.suffix,
-        }
-        if extra_fields:
-            sample.update(extra_fields)
-        return sample
 
 
 def build_data_loader(loader_config: dict[str, Any]) -> BaseDataLoader:
@@ -90,94 +50,51 @@ def build_data_loader(loader_config: dict[str, Any]) -> BaseDataLoader:
 @register_data_loader("glob")
 class GlobDataLoader(BaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
-        input_root_value = self.params.get("input_root")
-        if not input_root_value:
-            raise ValueError("data.params.input_root is required for glob data loader")
+        input_dir_value = self.params.get("input_dir") or self.params.get("input_root")
+        if not input_dir_value:
+            raise ValueError("data.params.input_dir is required for glob data loader")
 
-        input_root = self.resolve_path(input_root_value)
-        if not input_root.exists():
-            raise FileNotFoundError(f"input_root does not exist: {input_root}")
-
-        input_glob = self.params.get("input_glob", "**/*")
-        extensions = [
-            extension.lower() for extension in self.params.get("extensions", [])
-        ]
-
-        samples: list[dict[str, Any]] = []
-        for path in sorted(input_root.glob(input_glob)):
-            if not path.is_file():
-                continue
-            if extensions and path.suffix.lower() not in extensions:
-                continue
-            samples.append(self.build_sample(path, input_root=input_root))
-
-        return samples
-
-
-@register_data_loader("json_list")
-class JsonListDataLoader(BaseDataLoader):
-    def load(self) -> list[dict[str, Any]]:
-        samples_path_value = self.params.get("samples_path")
-        if not samples_path_value:
-            raise ValueError(
-                "data.params.samples_path is required for json_list data loader"
-            )
-
-        samples_path = self.resolve_path(samples_path_value)
-        if not samples_path.exists():
-            raise FileNotFoundError(f"samples_path does not exist: {samples_path}")
-
-        relative_root_value = self.params.get("relative_root")
-        relative_root = (
-            self.resolve_path(relative_root_value) if relative_root_value else None
-        )
-        file_format = self.params.get("format")
-
-        if file_format == "jsonl" or samples_path.suffix.lower() == ".jsonl":
-            rows = []
-            with open(samples_path, "r", encoding="utf-8") as file_obj:
-                for line in file_obj:
-                    line = line.strip()
-                    if line:
-                        rows.append(json.loads(line))
+        config_root = Path(self.config.get("_config_root", ".")).resolve()
+        if isinstance(input_dir_value, str) and input_dir_value.startswith("oss://"):
+            input_root = Path(oss_to_local(input_dir_value)).resolve()
         else:
-            with open(samples_path, "r", encoding="utf-8") as file_obj:
-                rows = json.load(file_obj)
+            input_root = Path(input_dir_value)
+            if not input_root.is_absolute():
+                input_root = (config_root / input_root).resolve()
 
-        if not isinstance(rows, list):
-            raise TypeError("json_list loader expects a JSON array or JSONL rows")
+        if not input_root.exists():
+            raise FileNotFoundError(f"input_dir does not exist: {input_root}")
+        if not input_root.is_dir():
+            raise NotADirectoryError(f"input_dir is not a directory: {input_root}")
+
+        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        if not 0.0 <= visualize_ratio <= 1.0:
+            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
 
         samples: list[dict[str, Any]] = []
-        for index, row in enumerate(rows):
-            if not isinstance(row, dict):
-                raise TypeError(f"sample row at index {index} must be a mapping")
-
-            input_path_value = row.get("input_path")
-            if input_path_value is None:
-                raise ValueError(f"sample row at index {index} is missing 'input_path'")
-
-            input_path = self.resolve_path(str(input_path_value))
-            if not input_path.exists():
-                raise FileNotFoundError(f"input_path does not exist: {input_path}")
-
-            sample = self.build_sample(
-                input_path,
-                input_root=relative_root,
-                sample_id=row.get("sample_id"),
-                extra_fields={
-                    key: value
-                    for key, value in row.items()
-                    if key not in {"sample_id", "input_path"}
-                },
+        for path in input_root.rglob("*.mp4"):
+            resolved_path = path.resolve()
+            video_path = ensure_oss_path(str(resolved_path), config_root=self._config_root)
+            samples.append(
+                {
+                    "video_path": video_path,
+                    "data_path": video_path.replace(".mp4", ".pose3d_hand"),
+                    "sample_id": Path(str(resolved_path)).name.replace(".mp4", ""),
+                    "visualize": self._should_visualize(Path(str(resolved_path)).name.replace(".mp4", ""), visualize_ratio),
+                }
             )
-            if "relative_path" in row:
-                sample["relative_path"] = str(row["relative_path"])
-                if "sample_id" not in row:
-                    sample["sample_id"] = sample["relative_path"]
-            samples.append(sample)
 
         return samples
 
+    def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:
+        if visualize_ratio <= 0.0:
+            return False
+        if visualize_ratio >= 1.0:
+            return True
+
+        digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
+        random_value = int.from_bytes(digest, "big") / float(1 << 64)
+        return random_value < visualize_ratio
 
 @register_data_loader("database_loader")
 class DatabaseDataLoader(BaseDataLoader):
@@ -186,6 +103,9 @@ class DatabaseDataLoader(BaseDataLoader):
         database_key = self.params.get("database_key")
         dataset_name = self.params.get("dataset_name")
         table_name = self.params.get("database_table")
+        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        if not 0.0 <= visualize_ratio <= 1.0:
+            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
         database: Client = create_client(database_url, database_key)
         start = 0
         samples: list[dict[str, Any]] = []
@@ -206,12 +126,28 @@ class DatabaseDataLoader(BaseDataLoader):
             print("Fetched {} samples from database".format(start))
             sample = [
                 {
-                    "video_path": response.data[i]["path"],
-                    "data_path": response.data[i]['path'].replace(".mp4", ".pose3d_hand"),
-                    "sample_id": response.data[i]["path"].replace(".mp4", ""),
+                    "video_path": ensure_oss_path(response.data[i]["path"], config_root=self._config_root),
+                    "data_path": ensure_oss_path(
+                        response.data[i]["path"].replace(".mp4", ".pose3d_hand"),
+                        config_root=self._config_root,
+                    ),
+                    "sample_id": Path(response.data[i]["path"]).name.replace(".mp4", ""),
+                    "visualize": self._should_visualize(
+                        Path(response.data[i]["path"]).name.replace(".mp4", ""),
+                        visualize_ratio,
+                    ),
                 }
                 for i in range(len(response.data))
             ]
             samples.extend(sample)
         return samples
-            
+
+    def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:
+        if visualize_ratio <= 0.0:
+            return False
+        if visualize_ratio >= 1.0:
+            return True
+
+        digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
+        random_value = int.from_bytes(digest, "big") / float(1 << 64)
+        return random_value < visualize_ratio
