@@ -77,6 +77,7 @@ class RuntimeSettings:
     num_workers: int
     limit: int | None
     resume: bool
+    cleanup_artifacts_on_reset: bool
     recover_in_progress: bool
     show_progress: bool
     ray_address: str | None
@@ -114,6 +115,7 @@ class PipelineManager:
         config["runtime"].setdefault("num_workers", os.cpu_count() or 1)
         config["runtime"].setdefault("limit", None)
         config["runtime"].setdefault("resume", False)
+        config["runtime"].setdefault("cleanup_artifacts_on_reset", True)
         config["runtime"].setdefault("recover_in_progress", True)
         config["runtime"].setdefault("show_progress", True)
         config["runtime"].setdefault("path_mapping", {})
@@ -161,6 +163,7 @@ class PipelineManager:
         num_workers = int(runtime_config.get("num_workers", os.cpu_count() or 1))
         limit = runtime_config.get("limit")
         resume = bool(runtime_config.get("resume", False))
+        cleanup_artifacts_on_reset = bool(runtime_config.get("cleanup_artifacts_on_reset", True))
         recover_in_progress = bool(runtime_config.get("recover_in_progress", True))
         show_progress = bool(runtime_config.get("show_progress", True))
         ray_worker_options = dict(ray_config.get("worker", {}))
@@ -173,6 +176,7 @@ class PipelineManager:
             num_workers=max(1, num_workers),
             limit=None if limit is None else int(limit),
             resume=resume,
+            cleanup_artifacts_on_reset=cleanup_artifacts_on_reset,
             recover_in_progress=recover_in_progress,
             show_progress=show_progress,
             ray_address=ray_config.get("address"),
@@ -205,7 +209,7 @@ class PipelineManager:
         if not self.runtime.resume:
             reset_count = self.manifest.reset_samples(
                 discovered_ids,
-                cleanup_artifacts=True,
+                cleanup_artifacts=self.runtime.cleanup_artifacts_on_reset,
                 last_error="Reset because runtime.resume=false.",
             )
             print(f"Reset {reset_count} sample(s) to pending because runtime.resume=false.")
@@ -249,6 +253,7 @@ class PipelineManager:
             raise
         finally:
             self._write_meta_file()
+            self._write_render_meta_file()
 
     def mark_interrupted(self, signal_name: str) -> None:
         self._interruption_signal = signal_name
@@ -324,6 +329,63 @@ class PipelineManager:
             print(f"Wrote processed data meta: {meta_path} (count={len(processed_entries)}).")
         except Exception as exc:
             print(f"Failed to write meta.json: {exc}")
+
+    def _resolve_render_layout(self) -> dict[str, Path] | None:
+        output_dir_value: str | dict[str, str] | None = None
+        render_relative_dir = Path("render")
+        render_meta_relative_path = Path("render_meta.json")
+
+        for process_config in self.raw_config.get("processes", []):
+            if not process_config.get("enabled", True):
+                continue
+            if process_config.get("type") != "render":
+                continue
+            params = dict(process_config.get("params", {}))
+            output_dir_value = params.get("output_dir")
+            render_relative_dir = Path(str(params.get("render_relative_dir", "render")))
+            render_meta_relative_path = Path(str(params.get("render_meta_relative_path", "render_meta.json")))
+            break
+
+        if output_dir_value is None:
+            return None
+
+        if isinstance(output_dir_value, dict):
+            local_value = output_dir_value.get("local") or output_dir_value.get("remote")
+            if not isinstance(local_value, str) or not local_value:
+                return None
+            output_root = resolve_config_path(self.project_root, local_value)
+        elif isinstance(output_dir_value, str):
+            output_root = resolve_config_path(self.project_root, output_dir_value)
+        else:
+            return None
+
+        return {
+            "output_root": output_root.resolve(),
+            "render_root": (output_root / render_relative_dir).resolve(),
+            "render_meta_path": (output_root / render_meta_relative_path).resolve(),
+        }
+
+    def _write_render_meta_file(self) -> None:
+        layout = self._resolve_render_layout()
+        if layout is None:
+            return
+
+        render_root = Path(layout["render_root"])
+        render_meta_path = Path(layout["render_meta_path"])
+        completed_ids = self.manifest.completed_sample_ids()
+        rendered_entries: list[dict[str, str]] = []
+        for sample_id in completed_ids:
+            relative = Path(sample_id)
+            render_video_path = (render_root / relative.parent / f"{relative.stem}.mp4").resolve()
+            if not render_video_path.exists():
+                continue
+            rendered_entries.append({"sample_id": sample_id})
+
+        try:
+            atomic_write_json(render_meta_path, rendered_entries, indent=2, sort_keys=True)
+            print(f"Wrote render meta: {render_meta_path} (count={len(rendered_entries)}).")
+        except Exception as exc:
+            print(f"Failed to write render_meta.json: {exc}")
 
     def _ensure_ray(self) -> None:
         if ray is None:

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable
 
-from supabase import create_client, Client
 from utils.oss_utils import ensure_oss_path, oss_to_local
+
+try:
+    from supabase import create_client, Client
+except ModuleNotFoundError:  # pragma: no cover - optional dependency for database loader
+    create_client = None
+    Client = Any  # type: ignore[assignment]
 
 DATA_LOADER_REGISTRY: dict[str, type["BaseDataLoader"]] = {}
 
@@ -99,6 +105,10 @@ class GlobDataLoader(BaseDataLoader):
 @register_data_loader("database_loader")
 class DatabaseDataLoader(BaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
+        if create_client is None:
+            raise ModuleNotFoundError(
+                "supabase is required for database_loader. Install it with `python -m pip install supabase`."
+            )
         database_url = self.params.get("database_url")
         database_key = self.params.get("database_key")
         dataset_name = self.params.get("dataset_name")
@@ -151,3 +161,82 @@ class DatabaseDataLoader(BaseDataLoader):
         digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
         random_value = int.from_bytes(digest, "big") / float(1 << 64)
         return random_value < visualize_ratio
+
+
+@register_data_loader("processed")
+@register_data_loader("processd")
+class ProcessedDataLoader(BaseDataLoader):
+    def load(self) -> list[dict[str, Any]]:
+        input_dir_value = self.params.get("input_dir")
+        if not input_dir_value:
+            raise ValueError("data.params.input_dir is required for processed data loader")
+
+        if isinstance(input_dir_value, str) and input_dir_value.startswith("oss://"):
+            input_root = Path(oss_to_local(input_dir_value)).resolve()
+        else:
+            input_root = Path(str(input_dir_value))
+            if not input_root.is_absolute():
+                input_root = (self._config_root / input_root).resolve()
+            else:
+                input_root = input_root.resolve()
+
+        meta_path = input_root / "meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"processed meta.json not found: {meta_path}")
+
+        with open(meta_path, "r", encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+        sample_ids = self._extract_sample_ids(payload)
+        if not sample_ids:
+            raise ValueError(f"no sample_id found in meta.json: {meta_path}")
+
+        samples: list[dict[str, Any]] = []
+        for sample_id in sample_ids:
+            relative = Path(sample_id)
+            parquet_path = (input_root / "data" / relative.parent / f"{relative.stem}.parquet").resolve()
+            meta_data_path = (input_root / "meta_data" / relative.parent / f"{relative.stem}.json").resolve()
+            if not parquet_path.exists() or not meta_data_path.exists():
+                continue
+
+            with open(meta_data_path, "r", encoding="utf-8") as file_obj:
+                sample_meta = json.load(file_obj)
+            if not isinstance(sample_meta, dict):
+                continue
+
+            sample = {
+                "sample_id": sample_id,
+                "trajectory_path": ensure_oss_path(str(parquet_path), config_root=self._config_root),
+                "meta_data_path": ensure_oss_path(str(meta_data_path), config_root=self._config_root),
+                "meta_data": sample_meta,
+                "video_path": sample_meta.get("video_path"),
+            }
+            samples.append(sample)
+
+        return samples
+
+    @staticmethod
+    def _extract_sample_ids(payload: Any) -> list[str]:
+        collected: list[str] = []
+
+        def _add_sample_id(value: Any) -> None:
+            if isinstance(value, str) and value:
+                collected.append(value)
+
+        if isinstance(payload, dict):
+            _add_sample_id(payload.get("sample_id"))
+            sample_ids = payload.get("sample_ids")
+            if isinstance(sample_ids, list):
+                for item in sample_ids:
+                    _add_sample_id(item)
+        elif isinstance(payload, list):
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                _add_sample_id(entry.get("sample_id"))
+                sample_ids = entry.get("sample_ids")
+                if isinstance(sample_ids, list):
+                    for item in sample_ids:
+                        _add_sample_id(item)
+
+        deduplicated = list(dict.fromkeys(collected))
+        return deduplicated

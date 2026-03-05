@@ -1,7 +1,8 @@
 __pycache__/
 .DS_Store
 workspace/
-manifest.json
+manifest.json*
+*manifest*
 
 examples/
 
