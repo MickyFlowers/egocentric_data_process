@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+export PYGLET_HEADLESS=1
+export PYOPENGL_PLATFORM=egl
+export EGL_DEVICE_ID=0
 
 set -euo pipefail
 
