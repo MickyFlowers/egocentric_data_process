@@ -1,0 +1,12 @@
+type: database_loader
+params:
+  dataset_name: "ml-egodex"
+  database_url: "http://192.168.3.208:54321"
+  database_key: "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+  database_table: "egocentric_dataset_clips"
+  path_field: path
+  data_extension: .hdf5
+  required_data_field: null
+  apply_multi_hand_filter: false
+  sample_id_tail_parts: 3
+  visualize_ratio: 0.0

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from utils.oss_utils import ensure_oss_path, oss_to_local
@@ -101,6 +101,53 @@ class BaseDataLoader:
             oss_prefix = "oss://"
         configure_path_mapping(str(local_mount), oss_prefix)
 
+    def _resolve_sample_id_tail_parts(
+        self,
+        *,
+        default: int | None = None,
+        dataset_name: str | None = None,
+    ) -> int | None:
+        raw_value = self.params.get("sample_id_tail_parts")
+        if raw_value is not None:
+            tail_parts = int(raw_value)
+            if tail_parts <= 0:
+                raise ValueError("data.params.sample_id_tail_parts must be a positive integer")
+            return tail_parts
+        if isinstance(dataset_name, str) and "egodex" in dataset_name.lower():
+            return 3
+        return default
+
+    def _build_sample_id(
+        self,
+        path_value: str | Path,
+        *,
+        relative_to: Path | None = None,
+        tail_parts: int | None = None,
+    ) -> str:
+        parts: list[str]
+        if relative_to is not None:
+            resolved_path = Path(path_value).resolve()
+            relative_root = Path(relative_to).resolve()
+            try:
+                relative_path = resolved_path.relative_to(relative_root)
+            except ValueError:
+                relative_path = resolved_path
+            parts = [part for part in relative_path.with_suffix("").parts if part not in ("", ".", "..")]
+        else:
+            raw_path = str(path_value).strip().replace("\\", "/")
+            if raw_path.startswith("oss://"):
+                raw_path = raw_path[len("oss://") :]
+            parts = [part for part in raw_path.split("/") if part not in ("", ".", "..")]
+            if parts:
+                parts[-1] = PurePosixPath(parts[-1]).stem
+
+        if tail_parts is not None and len(parts) > tail_parts:
+            parts = parts[-tail_parts:]
+        sample_id = "_".join(parts)
+        if not sample_id:
+            raise ValueError(f"failed to derive sample_id from path: {path_value}")
+        return sample_id
+
 
 def build_data_loader(loader_config: dict[str, Any]) -> BaseDataLoader:
     loader_type = loader_config["type"]
@@ -192,6 +239,9 @@ class EgoDexDataLoader(BaseDataLoader):
         recursive = bool(self.params.get("recursive", True))
         video_extension = str(self.params.get("video_extension", ".mp4"))
         strict_pairing = bool(self.params.get("strict_pairing", True))
+        sample_id_tail_parts = self._resolve_sample_id_tail_parts(
+            dataset_name=str(self.params.get("dataset_name", "")),
+        )
 
         iterator = input_root.rglob(annotation_glob) if recursive else input_root.glob(annotation_glob)
         samples: list[dict[str, Any]] = []
@@ -205,7 +255,11 @@ class EgoDexDataLoader(BaseDataLoader):
                     raise FileNotFoundError(f"paired video not found for {annotation_path}: {video_path}")
                 continue
 
-            sample_id = annotation_path.relative_to(input_root).with_suffix("").as_posix()
+            sample_id = self._build_sample_id(
+                annotation_path,
+                relative_to=input_root,
+                tail_parts=sample_id_tail_parts,
+            )
             resolved_annotation = annotation_path.resolve()
             resolved_video = video_path.resolve()
 
@@ -242,42 +296,63 @@ class DatabaseDataLoader(BaseDataLoader):
         database_key = self.params.get("database_key")
         dataset_name = self.params.get("dataset_name")
         table_name = self.params.get("database_table")
+        path_field = str(self.params.get("path_field", "path"))
+        data_path_field = self.params.get("data_path_field")
+        required_data_field = self.params.get("required_data_field", "pose3d_hand_path")
+        apply_multi_hand_filter = bool(self.params.get("apply_multi_hand_filter", True))
+        multi_hand_field = self.params.get("multi_hand_field", "multi_hand_flag")
+        multi_hand_value = self.params.get("multi_hand_value", "False")
+        order_field = str(self.params.get("order_field", path_field))
+        page_size = int(self.params.get("page_size", 1000))
+        data_extension = str(self.params.get("data_extension", ".pose3d_hand"))
         visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        sample_id_tail_parts = self._resolve_sample_id_tail_parts(
+            default=1,
+            dataset_name=str(dataset_name) if dataset_name is not None else None,
+        )
         if not 0.0 <= visualize_ratio <= 1.0:
             raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
+        if page_size <= 0:
+            raise ValueError("data.params.page_size must be a positive integer")
         database: Client = create_client(database_url, database_key)
         start = 0
         samples: list[dict[str, Any]] = []
+        select_fields = [path_field]
+        if isinstance(data_path_field, str) and data_path_field and data_path_field not in select_fields:
+            select_fields.append(data_path_field)
         while True:
-            response = (
-                database.table(table_name)
-                .select("path")
-                .eq("dataset_name", dataset_name)
-                .not_.is_("pose3d_hand_path", "null")
-                .is_("multi_hand_flag", "False")
-                .order("path")
-                .range(start, start + 1000 - 1)
-                .execute()
-            )
+            query = database.table(table_name).select(",".join(select_fields))
+            if dataset_name is not None:
+                query = query.eq("dataset_name", dataset_name)
+            if isinstance(required_data_field, str) and required_data_field:
+                query = query.not_.is_(required_data_field, "null")
+            if apply_multi_hand_filter and isinstance(multi_hand_field, str) and multi_hand_field:
+                query = query.is_(multi_hand_field, str(multi_hand_value))
+            response = query.order(order_field).range(start, start + page_size - 1).execute()
             if len(response.data) == 0:
                 break
             start += len(response.data)
             print("Fetched {} samples from database".format(start))
-            sample = [
-                {
-                    "video_path": ensure_oss_path(response.data[i]["path"], config_root=self._config_root),
-                    "data_path": ensure_oss_path(
-                        response.data[i]["path"].replace(".mp4", ".pose3d_hand"),
-                        config_root=self._config_root,
-                    ),
-                    "sample_id": Path(response.data[i]["path"]).name.replace(".mp4", ""),
-                    "visualize": self._should_visualize(
-                        Path(response.data[i]["path"]).name.replace(".mp4", ""),
-                        visualize_ratio,
-                    ),
-                }
-                for i in range(len(response.data))
-            ]
+            sample = []
+            for row in response.data:
+                video_path_value = row.get(path_field)
+                if not isinstance(video_path_value, str) or not video_path_value:
+                    continue
+                if isinstance(data_path_field, str) and data_path_field:
+                    data_path_value = row.get(data_path_field)
+                else:
+                    data_path_value = None
+                if not isinstance(data_path_value, str) or not data_path_value:
+                    data_path_value = video_path_value.replace(".mp4", data_extension)
+                sample_id = self._build_sample_id(video_path_value, tail_parts=sample_id_tail_parts)
+                sample.append(
+                    {
+                        "video_path": ensure_oss_path(video_path_value, config_root=self._config_root),
+                        "data_path": ensure_oss_path(data_path_value, config_root=self._config_root),
+                        "sample_id": sample_id,
+                        "visualize": self._should_visualize(sample_id, visualize_ratio),
+                    }
+                )
             samples.extend(sample)
         return samples
 
