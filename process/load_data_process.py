@@ -6,6 +6,11 @@ from typing import Any
 import imageio.v2 as imageio
 import numpy as np
 
+try:
+    import h5py
+except ModuleNotFoundError:  # pragma: no cover - optional dependency for EgoDex loading
+    h5py = None
+
 from utils.image_utils import (
     build_intrinsics,
     draw_hand_keypoints,
@@ -26,6 +31,45 @@ from utils.retarget_utils import (
 )
 
 from .core import BaseProcess, register_process
+
+# EgoDex exposes 25 hand joints. Drop the four non-thumb metacarpals so the
+# remaining order matches the 21-joint layout already assumed downstream.
+EGODEX_HAND_JOINT_SUFFIXES: tuple[str, ...] = (
+    "Hand",
+    "ThumbKnuckle",
+    "ThumbIntermediateBase",
+    "ThumbIntermediateTip",
+    "ThumbTip",
+    "IndexFingerKnuckle",
+    "IndexFingerIntermediateBase",
+    "IndexFingerIntermediateTip",
+    "IndexFingerTip",
+    "MiddleFingerKnuckle",
+    "MiddleFingerIntermediateBase",
+    "MiddleFingerIntermediateTip",
+    "MiddleFingerTip",
+    "RingFingerKnuckle",
+    "RingFingerIntermediateBase",
+    "RingFingerIntermediateTip",
+    "RingFingerTip",
+    "LittleFingerKnuckle",
+    "LittleFingerIntermediateBase",
+    "LittleFingerIntermediateTip",
+    "LittleFingerTip",
+)
+
+EGODEX_REQUIRED_JOINT_SUFFIXES: tuple[str, ...] = (
+    "Hand",
+    "ThumbKnuckle",
+    "ThumbIntermediateBase",
+    "ThumbIntermediateTip",
+    "ThumbTip",
+    "IndexFingerKnuckle",
+    "IndexFingerIntermediateBase",
+    "IndexFingerIntermediateTip",
+    "IndexFingerTip",
+    "LittleFingerKnuckle",
+)
 
 
 @register_process("load_data")
@@ -227,3 +271,254 @@ class LoadDataProcess(BaseProcess):
             sample["hand_pose_path"] = remote_output_path
         finally:
             reader.close()
+
+
+@register_process("load_egodex_data")
+@register_process("load_ego_dex_data")
+class LoadEgoDexDataProcess(LoadDataProcess):
+    def run(self, sample: dict[str, Any], context: Any) -> dict[str, Any]:
+        if h5py is None:
+            raise ModuleNotFoundError(
+                "h5py is required for load_egodex_data. Install it with `python -m pip install h5py`."
+            )
+
+        archive_path = self.resolve_sample_path(sample["data_path"])
+        with h5py.File(archive_path, "r") as archive:
+            intrinsics = self._load_egodex_intrinsics(archive)
+            frame_count = self._determine_egodex_frame_count(archive)
+            camera_transforms = self._read_egodex_transform_sequence(
+                archive,
+                joint_name="camera",
+                frame_count=frame_count,
+            )
+            camera_inverse = self._invert_egodex_transform_sequence(camera_transforms)
+
+            left_hand = self._extract_egodex_hand(
+                archive,
+                side="left",
+                frame_count=frame_count,
+                camera_inverse=camera_inverse,
+            )
+            right_hand = self._extract_egodex_hand(
+                archive,
+                side="right",
+                frame_count=frame_count,
+                camera_inverse=camera_inverse,
+            )
+
+        sample["left_hand"] = left_hand
+        sample["right_hand"] = right_hand
+        sample["fps"] = float(sample.get("fps", self.params.get("default_fps", 30.0)))
+        sample["image_size"] = self._resolve_egodex_image_size(intrinsics)
+        sample["intrinsics"] = intrinsics
+        sample["last_process"] = self.name
+        return sample
+
+    def _load_egodex_intrinsics(self, archive: Any) -> np.ndarray:
+        dataset = archive.get("camera/intrinsic")
+        if dataset is None:
+            dataset = archive.get("camera/intrinsics")
+        if dataset is None:
+            raise KeyError("missing EgoDex camera intrinsics at 'camera/intrinsic'")
+
+        intrinsics = np.asarray(dataset[:], dtype=np.float32)
+        if intrinsics.shape != (3, 3):
+            raise ValueError(f"unexpected EgoDex intrinsics shape: {intrinsics.shape}")
+        return intrinsics
+
+    def _determine_egodex_frame_count(self, archive: Any) -> int:
+        camera_dataset = archive.get("transforms/camera")
+        if camera_dataset is not None and len(camera_dataset.shape) >= 1:
+            return int(camera_dataset.shape[0])
+
+        for group_name in ("transforms", "confidences"):
+            group = archive.get(group_name)
+            if group is None:
+                continue
+            for dataset in group.values():
+                if len(dataset.shape) >= 1:
+                    return int(dataset.shape[0])
+        raise ValueError("unable to determine frame_count from EgoDex archive")
+
+    def _read_egodex_transform_sequence(
+        self,
+        archive: Any,
+        *,
+        joint_name: str,
+        frame_count: int,
+    ) -> np.ndarray:
+        dataset = archive.get(f"transforms/{joint_name}")
+        if dataset is None:
+            return np.full((frame_count, 4, 4), np.nan, dtype=np.float32)
+
+        transforms = np.asarray(dataset[:], dtype=np.float32)
+        if transforms.ndim != 3 or transforms.shape[1:] != (4, 4):
+            raise ValueError(
+                f"unexpected EgoDex transform shape for '{joint_name}': {transforms.shape}"
+            )
+        return self._align_egodex_frame_count(transforms, frame_count=frame_count, fill_value=np.nan)
+
+    def _read_egodex_confidence_sequence(
+        self,
+        archive: Any,
+        *,
+        joint_name: str,
+        frame_count: int,
+    ) -> np.ndarray | None:
+        dataset = archive.get(f"confidences/{joint_name}")
+        if dataset is None:
+            return None
+
+        confidence = np.asarray(dataset[:], dtype=np.float32).reshape(-1)
+        return self._align_egodex_frame_count(confidence, frame_count=frame_count, fill_value=np.nan)
+
+    def _align_egodex_frame_count(
+        self,
+        values: np.ndarray,
+        *,
+        frame_count: int,
+        fill_value: float,
+    ) -> np.ndarray:
+        output_shape = (frame_count,) + tuple(values.shape[1:])
+        aligned = np.full(output_shape, fill_value, dtype=values.dtype)
+        local_frame_count = min(frame_count, int(values.shape[0]))
+        if local_frame_count > 0:
+            aligned[:local_frame_count] = values[:local_frame_count]
+        return aligned
+
+    def _invert_egodex_transform_sequence(self, transforms: np.ndarray) -> np.ndarray:
+        matrices = np.asarray(transforms, dtype=np.float32)
+        inverse = np.full_like(matrices, np.nan, dtype=np.float32)
+        valid_mask = np.isfinite(matrices[:, :3, :4]).all(axis=(1, 2))
+        for frame_index in np.flatnonzero(valid_mask):
+            try:
+                inverse[frame_index] = np.linalg.inv(matrices[frame_index]).astype(np.float32, copy=False)
+            except np.linalg.LinAlgError:
+                continue
+        return inverse
+
+    def _extract_egodex_hand(
+        self,
+        archive: Any,
+        *,
+        side: str,
+        frame_count: int,
+        camera_inverse: np.ndarray,
+    ) -> dict[str, Any]:
+        keypoints = np.full((frame_count, len(EGODEX_HAND_JOINT_SUFFIXES), 3), np.nan, dtype=np.float32)
+        vertices = np.full((frame_count, 0, 3), np.nan, dtype=np.float32)
+        confidence_by_joint: dict[str, np.ndarray] = {}
+
+        for joint_index, suffix in enumerate(EGODEX_HAND_JOINT_SUFFIXES):
+            joint_name = f"{side}{suffix}"
+            transforms = self._read_egodex_transform_sequence(
+                archive,
+                joint_name=joint_name,
+                frame_count=frame_count,
+            )
+            camera_space = self._transform_egodex_sequence_to_camera(
+                transforms=transforms,
+                camera_inverse=camera_inverse,
+            )
+            keypoints[:, joint_index] = camera_space[:, :3, 3]
+
+            confidence = self._read_egodex_confidence_sequence(
+                archive,
+                joint_name=joint_name,
+                frame_count=frame_count,
+            )
+            if confidence is not None:
+                confidence_by_joint[suffix] = confidence
+
+        valid = self._compute_egodex_valid_mask(
+            keypoints,
+            confidence_by_joint=confidence_by_joint,
+        )
+        keypoints[~valid] = np.nan
+        return {"keypoints": keypoints, "vertices": vertices, "valid": valid}
+
+    def _transform_egodex_sequence_to_camera(
+        self,
+        *,
+        transforms: np.ndarray,
+        camera_inverse: np.ndarray,
+    ) -> np.ndarray:
+        joint_transforms = np.asarray(transforms, dtype=np.float32)
+        camera_matrices = np.asarray(camera_inverse, dtype=np.float32)
+        camera_space = np.full_like(joint_transforms, np.nan, dtype=np.float32)
+        valid_mask = np.isfinite(joint_transforms[:, :3, :4]).all(axis=(1, 2))
+        valid_mask &= np.isfinite(camera_matrices[:, :3, :4]).all(axis=(1, 2))
+        for frame_index in np.flatnonzero(valid_mask):
+            camera_space[frame_index] = (
+                camera_matrices[frame_index] @ joint_transforms[frame_index]
+            ).astype(np.float32, copy=False)
+        return camera_space
+
+    def _compute_egodex_valid_mask(
+        self,
+        keypoints: np.ndarray,
+        *,
+        confidence_by_joint: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        required_joint_names = self._resolve_egodex_required_joint_names()
+        joint_index_map = {
+            name: index
+            for index, name in enumerate(EGODEX_HAND_JOINT_SUFFIXES)
+        }
+        required_indices = [
+            joint_index_map[name]
+            for name in required_joint_names
+            if name in joint_index_map
+        ]
+        if not required_indices:
+            required_indices = list(range(len(EGODEX_HAND_JOINT_SUFFIXES)))
+
+        required_points = np.asarray(keypoints[:, required_indices], dtype=np.float32)
+        valid = np.isfinite(required_points).all(axis=(1, 2))
+
+        confidence_threshold = self.params.get("confidence_threshold")
+        if confidence_threshold is None:
+            return valid.astype(np.bool_, copy=False)
+
+        threshold = float(confidence_threshold)
+        min_required_joint_count = int(
+            self.params.get("min_required_joint_count", len(required_joint_names))
+        )
+        available_counts = np.zeros((keypoints.shape[0],), dtype=np.int32)
+        confident_counts = np.zeros((keypoints.shape[0],), dtype=np.int32)
+
+        for joint_name in required_joint_names:
+            confidence = confidence_by_joint.get(joint_name)
+            if confidence is None:
+                continue
+            confidence_values = np.asarray(confidence, dtype=np.float32).reshape(-1)
+            finite_mask = np.isfinite(confidence_values)
+            available_counts += finite_mask.astype(np.int32, copy=False)
+            confident_counts += (finite_mask & (confidence_values >= threshold)).astype(np.int32, copy=False)
+
+        if np.any(available_counts > 0):
+            required_counts = np.minimum(
+                available_counts,
+                np.full_like(available_counts, max(0, min_required_joint_count)),
+            )
+            valid &= confident_counts >= required_counts
+
+        return valid.astype(np.bool_, copy=False)
+
+    def _resolve_egodex_required_joint_names(self) -> tuple[str, ...]:
+        configured = self.params.get("required_joint_names")
+        if not isinstance(configured, (list, tuple)):
+            return EGODEX_REQUIRED_JOINT_SUFFIXES
+
+        names = [str(value) for value in configured if str(value)]
+        if not names:
+            return EGODEX_REQUIRED_JOINT_SUFFIXES
+        return tuple(names)
+
+    def _resolve_egodex_image_size(self, intrinsics: np.ndarray) -> tuple[int, int]:
+        configured = self.params.get("image_size")
+        if isinstance(configured, (list, tuple)) and len(configured) == 2:
+            return int(configured[0]), int(configured[1])
+
+        center = np.array([intrinsics[0, 2], intrinsics[1, 2]], dtype=np.float32)
+        return infer_image_size(center)

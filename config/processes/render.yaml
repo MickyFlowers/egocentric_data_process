@@ -16,6 +16,8 @@
     target_short_side: 512
     genesis_backend: cpu
     default_fov_deg: 55.0
+    camera_near: 0.001
+    camera_far: 10.0
     render_height: null
     render_width: null
     render_relative_dir: render

@@ -50,7 +50,7 @@ def atomic_write_text(final_path: str | Path, content: str, encoding: str = "utf
         with open(temp_path, "w", encoding=encoding) as file_obj:
             file_obj.write(content)
         commit_temp_path(temp_path, final_path)
-    except Exception:
+    except BaseException:
         remove_path(temp_path)
         raise
 
@@ -61,6 +61,6 @@ def atomic_write_json(final_path: str | Path, payload: Any, indent: int = 2, *, 
         with open(temp_path, "w", encoding="utf-8") as file_obj:
             json.dump(payload, file_obj, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
         commit_temp_path(temp_path, final_path)
-    except Exception:
+    except BaseException:
         remove_path(temp_path)
         raise

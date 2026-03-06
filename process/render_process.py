@@ -229,6 +229,7 @@ class RenderProcess(BaseProcess):
         backend: str,
     ) -> tuple["_GenesisSegmentationRenderer", int, int]:
         target_h, target_w = self._resolve_target_size(source_h=source_h, source_w=source_w)
+        camera_near, camera_far = self._resolve_camera_clip_planes()
         current_spec = {
             "urdf_path": str(Path(urdf_path).resolve()),
             "joint_names": tuple(joint_names),
@@ -236,6 +237,8 @@ class RenderProcess(BaseProcess):
             "backend": str(backend).lower(),
             "height": int(target_h),
             "width": int(target_w),
+            "camera_near": float(camera_near),
+            "camera_far": float(camera_far),
         }
 
         if self._renderer is not None and self._renderer_spec == current_spec:
@@ -249,9 +252,20 @@ class RenderProcess(BaseProcess):
             height=target_h,
             default_fov_deg=default_fov_deg,
             init_backend=backend,
+            camera_near=camera_near,
+            camera_far=camera_far,
         )
         self._renderer_spec = dict(current_spec)
         return self._renderer, target_h, target_w
+
+    def _resolve_camera_clip_planes(self) -> tuple[float, float]:
+        camera_near = float(self.params.get("camera_near", 0.005))
+        camera_far = float(self.params.get("camera_far", 10.0))
+        if not np.isfinite(camera_near) or camera_near <= 0.0:
+            raise ValueError("render process requires positive finite params.camera_near")
+        if not np.isfinite(camera_far) or camera_far <= camera_near:
+            raise ValueError("render process requires params.camera_far > params.camera_near")
+        return camera_near, camera_far
 
     def _resolve_target_size(self, *, source_h: int, source_w: int) -> tuple[int, int]:
         configured_height = self.params.get("render_height")
@@ -699,6 +713,8 @@ class _GenesisSegmentationRenderer:
         height: int,
         default_fov_deg: float,
         init_backend: str,
+        camera_near: float,
+        camera_far: float,
     ) -> None:
         try:
             import genesis as gs
@@ -713,6 +729,8 @@ class _GenesisSegmentationRenderer:
         self._height = int(height)
         self._default_fov_deg = float(default_fov_deg)
         self._init_backend = str(init_backend).lower()
+        self._camera_near = float(camera_near)
+        self._camera_far = float(camera_far)
         self._ensure_initialized()
         self._scene = self._create_scene()
         self._robot = self._scene.add_entity(
@@ -742,6 +760,8 @@ class _GenesisSegmentationRenderer:
             lookat=(0.0, 0.0, 0.2),
             up=(0.0, 0.0, 1.0),
             fov=self._default_fov_deg,
+            near=self._camera_near,
+            far=self._camera_far,
             GUI=False,
         )
         self._scene.build(n_envs=1)

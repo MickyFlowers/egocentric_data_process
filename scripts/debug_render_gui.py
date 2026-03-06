@@ -463,6 +463,8 @@ class GenesisGuiDebugger:
         camera_height: int,
         backend: str,
         default_fov_deg: float,
+        camera_near: float,
+        camera_far: float,
     ) -> None:
         try:
             import genesis as gs
@@ -476,6 +478,8 @@ class GenesisGuiDebugger:
         self._camera_width = int(camera_width)
         self._camera_height = int(camera_height)
         self._default_fov_deg = float(default_fov_deg)
+        self._camera_near = float(camera_near)
+        self._camera_far = float(camera_far)
         self._backend = str(backend).lower()
         self._init_once()
 
@@ -746,6 +750,8 @@ class GenesisGuiDebugger:
             "lookat": [0.0, 0.0, 0.2],
             "up": [0.0, 0.0, 1.0],
             "fov": self._default_fov_deg,
+            "near": self._camera_near,
+            "far": self._camera_far,
         }
         attempts = (
             {"res": (self._camera_width, self._camera_height), "GUI": True, **base_kwargs},
@@ -1347,6 +1353,8 @@ def main() -> None:
         help="When camera size is not fully specified, keep source aspect ratio and scale short side to this value.",
     )
     parser.add_argument("--default-fov-deg", type=float, default=55.0, help="Fallback camera fov.")
+    parser.add_argument("--camera-near", type=float, default=0.005, help="Genesis camera near clip plane in meters.")
+    parser.add_argument("--camera-far", type=float, default=10.0, help="Genesis camera far clip plane in meters.")
     parser.add_argument("--start-frame", type=int, default=0, help="Start frame index.")
     parser.add_argument("--max-frames", type=int, default=0, help="Maximum frames to play, 0 means all.")
     parser.add_argument("--stride", type=int, default=1, help="Frame stride.")
@@ -1425,6 +1433,8 @@ def main() -> None:
         camera_height=camera_h,
         backend=str(args.backend),
         default_fov_deg=float(args.default_fov_deg),
+        camera_near=float(args.camera_near),
+        camera_far=float(args.camera_far),
     )
 
     start = max(0, int(args.start_frame))

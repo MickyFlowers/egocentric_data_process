@@ -1,0 +1,11 @@
+defaults:
+  - data: egodex_loader
+  - runtime: default
+  - processes: egodex_process
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ./workspace/hydra/${now:%Y-%m-%d_%H-%M-%S}

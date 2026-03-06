@@ -28,13 +28,13 @@ class PipelineContext:
 
         try:
             yield temp_path
-            self.manifest.add_artifact(self.sample_id, final_path)
-            self._cleanup_paths.add(final_path)
             commit_temp_path(temp_path, final_path)
+            self._cleanup_paths.add(final_path)
+            self.manifest.add_artifact(self.sample_id, final_path)
             self.manifest.remove_temp_artifact(self.sample_id, temp_path)
             self._temp_paths.discard(temp_path)
             self._cleanup_paths.discard(temp_path)
-        except Exception:
+        except BaseException:
             remove_path(temp_path)
             self.manifest.discard_paths(self.sample_id, [temp_path, final_path])
             self._temp_paths.discard(temp_path)

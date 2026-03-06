@@ -40,10 +40,47 @@ class BaseDataLoader:
         self._configure_path_mapping()
 
     def __call__(self) -> list[dict[str, Any]]:
-        return self.load()
+        return self._finalize_samples(self.load())
 
     def load(self) -> list[dict[str, Any]]:
         raise NotImplementedError
+
+    def _finalize_samples(self, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._partition_samples(samples)
+
+    def _partition_samples(self, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        raw_num_parts = self.params.get("num_parts", 1)
+        raw_part = self.params.get("part", 0)
+
+        num_parts = int(raw_num_parts)
+        part = int(raw_part)
+        if num_parts <= 0:
+            raise ValueError("data.params.num_parts must be a positive integer")
+        if part < 0 or part >= num_parts:
+            raise ValueError(
+                f"data.params.part must satisfy 0 <= part < num_parts, got part={part}, num_parts={num_parts}"
+            )
+        if num_parts == 1:
+            return samples
+
+        sorted_samples = sorted(
+            samples,
+            key=lambda sample: str(sample.get("sample_id", "")),
+        )
+        partitioned: list[dict[str, Any]] = []
+        for index, sample in enumerate(sorted_samples):
+            sample_id = sample.get("sample_id")
+            if not isinstance(sample_id, str) or not sample_id:
+                raise KeyError("partitioned data loader requires non-empty string sample_id for every sample")
+            if (index % num_parts) != part:
+                continue
+            partitioned.append(sample)
+
+        print(
+            f"[data_loader] partition enabled: part={part}, num_parts={num_parts}, "
+            f"kept={len(partitioned)}/{len(samples)} sample(s)"
+        )
+        return partitioned
 
     def _configure_path_mapping(self) -> None:
         mapping = self.config.get("_path_mapping")
@@ -122,6 +159,77 @@ class GlobDataLoader(BaseDataLoader):
         digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
         random_value = int.from_bytes(digest, "big") / float(1 << 64)
         return random_value < visualize_ratio
+
+
+@register_data_loader("egodex")
+@register_data_loader("ego_dex")
+class EgoDexDataLoader(BaseDataLoader):
+    def load(self) -> list[dict[str, Any]]:
+        input_dir_value = self.params.get("input_dir") or self.params.get("input_root")
+        if not input_dir_value:
+            raise ValueError("data.params.input_dir is required for egodex data loader")
+
+        config_root = Path(self.config.get("_config_root", ".")).resolve()
+        if isinstance(input_dir_value, str) and input_dir_value.startswith("oss://"):
+            input_root = Path(oss_to_local(input_dir_value)).resolve()
+        else:
+            input_root = Path(str(input_dir_value))
+            if not input_root.is_absolute():
+                input_root = (config_root / input_root).resolve()
+            else:
+                input_root = input_root.resolve()
+
+        if not input_root.exists():
+            raise FileNotFoundError(f"input_dir does not exist: {input_root}")
+        if not input_root.is_dir():
+            raise NotADirectoryError(f"input_dir is not a directory: {input_root}")
+
+        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        if not 0.0 <= visualize_ratio <= 1.0:
+            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
+
+        annotation_glob = str(self.params.get("annotation_glob") or self.params.get("input_glob") or "*.hdf5")
+        recursive = bool(self.params.get("recursive", True))
+        video_extension = str(self.params.get("video_extension", ".mp4"))
+        strict_pairing = bool(self.params.get("strict_pairing", True))
+
+        iterator = input_root.rglob(annotation_glob) if recursive else input_root.glob(annotation_glob)
+        samples: list[dict[str, Any]] = []
+        for annotation_path in sorted(iterator):
+            if not annotation_path.is_file():
+                continue
+
+            video_path = annotation_path.with_suffix(video_extension)
+            if not video_path.exists():
+                if strict_pairing:
+                    raise FileNotFoundError(f"paired video not found for {annotation_path}: {video_path}")
+                continue
+
+            sample_id = annotation_path.relative_to(input_root).with_suffix("").as_posix()
+            resolved_annotation = annotation_path.resolve()
+            resolved_video = video_path.resolve()
+
+            samples.append(
+                {
+                    "video_path": ensure_oss_path(str(resolved_video), config_root=self._config_root),
+                    "data_path": ensure_oss_path(str(resolved_annotation), config_root=self._config_root),
+                    "sample_id": sample_id,
+                    "visualize": self._should_visualize(sample_id, visualize_ratio),
+                }
+            )
+
+        return samples
+
+    def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:
+        if visualize_ratio <= 0.0:
+            return False
+        if visualize_ratio >= 1.0:
+            return True
+
+        digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
+        random_value = int.from_bytes(digest, "big") / float(1 << 64)
+        return random_value < visualize_ratio
+
 
 @register_data_loader("database_loader")
 class DatabaseDataLoader(BaseDataLoader):
