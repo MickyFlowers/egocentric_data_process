@@ -8,6 +8,7 @@ imageio
 imageio-ffmpeg
 opencv-python
 pyarrow
+h5py
 # chumpy==0.70
 # manopth @ git+https://github.com/hassony2/manopth.git
 
