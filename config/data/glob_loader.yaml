@@ -1,5 +1,6 @@
 type: glob
 params:
+  dataset_name: "test_dataset"
   input_dir: ./examples
   input_glob: "**/*"
   extensions:

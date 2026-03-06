@@ -4,7 +4,7 @@
   params:
     output_dir: &shared_output_dir
       local: ./outputs
-      remote: ./outputs
+      remote: oss://ss-oss1/data/dataset/egocentric/${data.params.dataset_name}/processed
     mano_model_dir: ./assets/mano_v1_2/models
     device: cpu
     use_pca: false
@@ -17,8 +17,14 @@
   params:
     output_dir: *shared_output_dir
     axis_length: 0.03
-    workspace_center: [0.25, 0.0, 0.4]
+    workspace_center: [0.25, 0.0, 0.1]
     camera_elevation_deg: 45.0
+    gripper_filter:
+      enabled: true
+      hold_invalid: true
+      median_window: 3
+      ema_alpha: 0.35
+      ema_passes: 1
     use_ekf: true
     ekf:
       edge_pad: 24
@@ -47,17 +53,30 @@
       orientation_weight: 1.0
       continuity_weight: 0.05
       damping: 1.0e-4
-      max_iterations: 64
+      max_iterations: 96
       max_joint_step: 0.15
       max_frame_delta: 0.35
       position_tolerance: 0.01
       orientation_tolerance: 0.3
+      early_stop_position_tolerance: 0.005
+      early_stop_orientation_tolerance: 0.12
+      use_joint_ekf_smoothing: true
+      ekf_dt: 1.0
+      ekf_process_noise_position: 5.0e-5
+      ekf_process_noise_velocity: 1.5e-3
+      ekf_measurement_noise: 8.0e-3
+      ekf_initial_position_var: 2.0e-4
+      ekf_initial_velocity_var: 2.0e-2
       collision:
         enabled: false
         required: false
         weight: 5.0
-        safe_distance: 0.01
-        check_interval: 2
+        safe_distance: 0.002
+        check_interval: 10
+        filter_adjacent_pairs: true
+        filter_neutral_touching_pairs: true
+        neutral_touching_tolerance: 1.0e-9
+        ignore_links: [base_link, left_base_link, right_base_link, left_link1, right_link1, left_link6, right_link6, left_link7, left_link8, right_link7, right_link8]
     sides:
       left:
         base_frame: left_base_link

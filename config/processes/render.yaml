@@ -2,7 +2,8 @@
   type: render_filter
   enabled: true
   params:
-    reachable_ratio_threshold: 0.9
+    reachable_ratio_threshold: 0.6
+    collision_ratio_threshold: 0.05
 
 - name: render
   type: render
@@ -13,9 +14,9 @@
       remote: ./outputs
     urdf_path: ./assets/aloha_new_description/urdf/dual_piper.urdf
     target_short_side: 512
-    overlay_alpha: 0.4
-    overlay_color_bgr: [0, 200, 255]
     genesis_backend: cpu
     default_fov_deg: 55.0
+    render_height: null
+    render_width: null
     render_relative_dir: render
     render_meta_relative_path: render_meta.json

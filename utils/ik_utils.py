@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 
 import numpy as np
 from scipy.spatial.transform import Rotation as Rscipy
@@ -24,9 +25,15 @@ class IKConfig:
     max_frame_delta: float = 0.35
     position_tolerance: float = 0.02
     orientation_tolerance: float = 0.25
+    early_stop_position_tolerance: float | None = None
+    early_stop_orientation_tolerance: float | None = None
     collision_weight: float = 5.0
     collision_safe_distance: float = 0.01
     collision_check_interval: int = 2
+    collision_filter_adjacent_pairs: bool = True
+    collision_filter_neutral_touching_pairs: bool = True
+    collision_neutral_touching_tolerance: float = 1.0e-9
+    collision_ignore_links: tuple[str, ...] = ()
     use_collision: bool = False
     require_collision: bool = False
     use_joint_ekf_smoothing: bool = True
@@ -95,10 +102,22 @@ class PinocchioIKSolver:
             raise ValueError("joint_names cannot be empty")
 
         self.config = config or IKConfig()
+        self.ignored_collision_links = {str(name) for name in self.config.collision_ignore_links if str(name)}
+        self.early_stop_position_tolerance = float(
+            self.config.early_stop_position_tolerance
+            if self.config.early_stop_position_tolerance is not None
+            else self.config.position_tolerance
+        )
+        self.early_stop_orientation_tolerance = float(
+            self.config.early_stop_orientation_tolerance
+            if self.config.early_stop_orientation_tolerance is not None
+            else self.config.orientation_tolerance
+        )
         self.urdf_path = Path(urdf_path).expanduser().resolve()
         self.package_dirs = [str(Path(path).expanduser().resolve()) for path in (package_dirs or [])]
         self.model = pin.buildModelFromUrdf(str(self.urdf_path))
         self.data = self.model.createData()
+        self.adjacent_collision_link_pairs = self._build_adjacent_collision_link_pairs()
 
         self.ee_frame_id = self._require_frame_id(ee_frame)
         self.base_frame_id = self._require_frame_id(base_frame) if base_frame else None
@@ -107,6 +126,7 @@ class PinocchioIKSolver:
         self.joint_ids = [self._require_joint_id(name) for name in self.joint_names]
         self.q_indices: list[int] = []
         self.v_indices: list[int] = []
+        self._joint_q_index_cache: dict[str, int] = {}
         for joint_id in self.joint_ids:
             if int(self.model.nqs[joint_id]) != 1 or int(self.model.nvs[joint_id]) != 1:
                 joint_name = self.model.names[joint_id]
@@ -118,8 +138,15 @@ class PinocchioIKSolver:
         self.q_indices_arr = np.asarray(self.q_indices, dtype=np.int64)
         self.v_indices_arr = np.asarray(self.v_indices, dtype=np.int64)
 
-        lower = self.model.lowerPositionLimit[self.q_indices_arr].astype(np.float64, copy=True)
-        upper = self.model.upperPositionLimit[self.q_indices_arr].astype(np.float64, copy=True)
+        full_lower = self.model.lowerPositionLimit.astype(np.float64, copy=True)
+        full_upper = self.model.upperPositionLimit.astype(np.float64, copy=True)
+        full_lower[~np.isfinite(full_lower)] = -np.inf
+        full_upper[~np.isfinite(full_upper)] = np.inf
+        self.full_lower = full_lower
+        self.full_upper = full_upper
+
+        lower = self.full_lower[self.q_indices_arr].copy()
+        upper = self.full_upper[self.q_indices_arr].copy()
         lower[~np.isfinite(lower)] = -np.inf
         upper[~np.isfinite(upper)] = np.inf
         self.lower = lower
@@ -138,15 +165,20 @@ class PinocchioIKSolver:
 
         self.collision_model = None
         self.collision_data = None
+        self.collision_pair_mask = np.zeros((0,), dtype=np.bool_)
+        self.collision_pair_count_total = 0
+        self.collision_pair_count_active = 0
+        self.collision_pair_count_filtered = 0
+        self.collision_available = False
         self.collision_enabled = False
-        if self.config.use_collision:
-            self._try_enable_collision()
+        self._try_enable_collision()
 
     def solve_trajectory(
         self,
         *,
         pose_vectors: np.ndarray,
         initial_joint_positions: list[float] | np.ndarray | None = None,
+        compute_collision: bool = True,
     ) -> dict[str, Any]:
         poses = ensure_pose_array(pose_vectors)
         frame_count = int(poses.shape[0])
@@ -207,15 +239,19 @@ class PinocchioIKSolver:
             iterations=iterations,
             reachable=reachable,
         )
-        if self.config.use_joint_ekf_smoothing and frame_count > 1:
+        ekf_applied = bool(self.config.use_joint_ekf_smoothing and frame_count > 1)
+        if ekf_applied:
             joints = self._smooth_joint_trajectory_with_ekf(joints)
-            self._recompute_errors_from_joints(
-                poses=poses[:, :6],
-                joints=joints,
-                position_error=position_error,
-                orientation_error=orientation_error,
-                reachable=reachable,
-            )
+        # Always recompute from final returned joints to keep metrics strictly aligned
+        # with the trajectory emitted by solver (post-EKF when enabled).
+        self._recompute_errors_from_joints(
+            poses=poses[:, :6],
+            joints=joints,
+            position_error=position_error,
+            orientation_error=orientation_error,
+            reachable=reachable,
+        )
+        collision = self._compute_collision_flags_from_joints(joints) if compute_collision else None
 
         return {
             "joint_names": list(self.joint_names),
@@ -224,25 +260,30 @@ class PinocchioIKSolver:
             "orientation_error": orientation_error,
             "iterations": iterations,
             "reachable": reachable,
+            "collision": collision,
+            "ekf_applied": ekf_applied,
         }
 
     def _solve_single_pose(self, *, target: Any, q_seed: np.ndarray, q_prev: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
-        q = q_seed.copy()
-        best = self._frame_metrics(q=q, target=target, q_prev=q_prev, iteration=0)
-        best_q = q.copy()
+        current_q = q_seed.copy()
+        current = self._frame_metrics(q=current_q, target=target, q_prev=q_prev, iteration=0)
+        best_q = current_q.copy()
+        best = dict(current)
+        last_iteration = 0
 
         for iteration in range(1, self.config.max_iterations + 1):
-            err = best["error_vector"]
+            last_iteration = iteration
             if (
-                best["position_error"] <= self.config.position_tolerance
-                and best["orientation_error"] <= self.config.orientation_tolerance
+                current["position_error"] <= self.early_stop_position_tolerance
+                and current["orientation_error"] <= self.early_stop_orientation_tolerance
             ):
                 break
+            err = current["error_vector"]
 
             jacobian = pin.computeFrameJacobian(
                 self.model,
                 self.data,
-                q,
+                current_q,
                 self.ee_frame_id,
                 pin.ReferenceFrame.LOCAL,
             )
@@ -250,12 +291,12 @@ class PinocchioIKSolver:
 
             weight = np.array(
                 [
-                    self.config.orientation_weight,
-                    self.config.orientation_weight,
-                    self.config.orientation_weight,
                     self.config.position_weight,
                     self.config.position_weight,
                     self.config.position_weight,
+                    self.config.orientation_weight,
+                    self.config.orientation_weight,
+                    self.config.orientation_weight,
                 ],
                 dtype=np.float64,
             )
@@ -263,7 +304,7 @@ class PinocchioIKSolver:
             jw = jacobian_active * w_sqrt[:, None]
             ew = err * w_sqrt
 
-            q_active = q[self.q_indices_arr]
+            q_active = current_q[self.q_indices_arr]
             smooth_grad = self.config.continuity_weight * (q_prev - q_active)
             hessian = (
                 jw.T @ jw
@@ -276,24 +317,31 @@ class PinocchioIKSolver:
                 dq_active = np.linalg.lstsq(hessian, gradient, rcond=None)[0]
             dq_active = np.clip(dq_active, -self.config.max_joint_step, self.config.max_joint_step)
 
-            q_current = q
-            candidate_q, candidate = self._line_search(
-                q=q,
+            next_q, next_metrics = self._line_search(
+                q=current_q,
                 dq_active=dq_active,
                 target=target,
                 q_prev=q_prev,
                 iteration=iteration,
             )
-            q = candidate_q
-            if candidate["objective"] + 1.0e-12 < best["objective"]:
-                best = candidate
-                best_q = candidate_q.copy()
-            else:
-                best = candidate
-                if np.allclose(candidate_q, q_current, rtol=0.0, atol=1.0e-10):
-                    break
+            if np.allclose(next_q, current_q, rtol=0.0, atol=1.0e-10):
+                current_q = next_q
+                current = next_metrics
+                if current["objective"] + 1.0e-12 < best["objective"]:
+                    best_q = current_q.copy()
+                    best = dict(current)
+                break
 
-        return best_q, best
+            current_q = next_q
+            current = next_metrics
+            if current["objective"] + 1.0e-12 < best["objective"]:
+                best_q = current_q.copy()
+                best = dict(current)
+
+        # Report metrics that are strictly aligned with the returned best_q.
+        result = dict(best)
+        result["iteration"] = int(last_iteration)
+        return best_q, result
 
     def _line_search(
         self,
@@ -324,8 +372,9 @@ class PinocchioIKSolver:
         current = self.data.oMf[self.ee_frame_id]
         delta = current.actInv(target)
         error_vector = pin.log(delta).vector.astype(np.float64, copy=False)
-        orientation_error = float(np.linalg.norm(error_vector[:3]))
-        position_error = float(np.linalg.norm(error_vector[3:6]))
+        # Pinocchio log(SE3) vector layout is [translation(3), rotation(3)].
+        position_error = float(np.linalg.norm(error_vector[:3]))
+        orientation_error = float(np.linalg.norm(error_vector[3:6]))
 
         q_active = q[self.q_indices_arr]
         smooth_penalty = float(np.dot(q_active - q_prev, q_active - q_prev))
@@ -345,8 +394,19 @@ class PinocchioIKSolver:
             "iteration": int(iteration),
         }
 
-    def _smooth_joint_trajectory_with_ekf(self, joints: np.ndarray) -> np.ndarray:
-        q_obs = np.asarray(joints, dtype=np.float64)
+    def smooth_trajectory_with_ekf(
+        self,
+        trajectory: np.ndarray,
+        *,
+        lower: np.ndarray | None = None,
+        upper: np.ndarray | None = None,
+    ) -> np.ndarray:
+        q_obs = np.asarray(trajectory, dtype=np.float64)
+        if q_obs.ndim != 2:
+            raise ValueError(f"trajectory shape mismatch: expected [N, D], got {q_obs.shape}")
+        if q_obs.shape[0] <= 0:
+            return q_obs.copy()
+
         frame_count, joint_count = q_obs.shape
         state_dim = joint_count * 2
         dt = float(max(self.config.ekf_dt, 1.0e-6))
@@ -438,8 +498,19 @@ class PinocchioIKSolver:
             smoothed_cov[frame_index] = self._stabilize_covariance(smoothed_cov_raw)
 
         smoothed_q = smoothed_state[:, :joint_count]
-        smoothed_q = self._clip_joint_trajectory(smoothed_q)
-        return smoothed_q
+        return self._clip_trajectory_to_bounds(
+            smoothed_q,
+            lower=lower,
+            upper=upper,
+            expected_dim=joint_count,
+        )
+
+    def _smooth_joint_trajectory_with_ekf(self, joints: np.ndarray) -> np.ndarray:
+        return self.smooth_trajectory_with_ekf(
+            joints,
+            lower=self.lower,
+            upper=self.upper,
+        )
 
     @staticmethod
     def _stabilize_covariance(covariance: np.ndarray, limit: float = 1.0e6) -> np.ndarray:
@@ -449,21 +520,53 @@ class PinocchioIKSolver:
         return np.clip(cov, -limit, limit)
 
     def _clip_joint_trajectory(self, joint_positions: np.ndarray) -> np.ndarray:
-        clipped = np.asarray(joint_positions, dtype=np.float64).copy()
-        if clipped.ndim != 2 or clipped.shape[1] != len(self.q_indices):
-            raise ValueError(
-                f"joint trajectory shape mismatch: expected [N, {len(self.q_indices)}], got {clipped.shape}"
-            )
-        if self.has_lower.any():
-            clipped[:, self.has_lower] = np.maximum(
-                clipped[:, self.has_lower],
-                self.lower[self.has_lower].reshape(1, -1),
-            )
-        if self.has_upper.any():
-            clipped[:, self.has_upper] = np.minimum(
-                clipped[:, self.has_upper],
-                self.upper[self.has_upper].reshape(1, -1),
-            )
+        return self._clip_trajectory_to_bounds(
+            joint_positions,
+            lower=self.lower,
+            upper=self.upper,
+            expected_dim=len(self.q_indices),
+        )
+
+    @staticmethod
+    def _clip_trajectory_to_bounds(
+        trajectory: np.ndarray,
+        *,
+        lower: np.ndarray | None = None,
+        upper: np.ndarray | None = None,
+        expected_dim: int | None = None,
+    ) -> np.ndarray:
+        clipped = np.asarray(trajectory, dtype=np.float64).copy()
+        if clipped.ndim != 2:
+            raise ValueError(f"trajectory shape mismatch: expected [N, D], got {clipped.shape}")
+        dim = int(clipped.shape[1])
+        if expected_dim is not None and dim != int(expected_dim):
+            raise ValueError(f"trajectory dim mismatch: expected D={expected_dim}, got D={dim}")
+
+        if lower is not None:
+            lower_arr = np.asarray(lower, dtype=np.float64).reshape(-1)
+            if lower_arr.shape[0] != dim:
+                raise ValueError(
+                    f"lower bound dim mismatch: expected D={dim}, got D={lower_arr.shape[0]}"
+                )
+            finite_lower = np.isfinite(lower_arr)
+            if finite_lower.any():
+                clipped[:, finite_lower] = np.maximum(
+                    clipped[:, finite_lower],
+                    lower_arr[finite_lower].reshape(1, -1),
+                )
+
+        if upper is not None:
+            upper_arr = np.asarray(upper, dtype=np.float64).reshape(-1)
+            if upper_arr.shape[0] != dim:
+                raise ValueError(
+                    f"upper bound dim mismatch: expected D={dim}, got D={upper_arr.shape[0]}"
+                )
+            finite_upper = np.isfinite(upper_arr)
+            if finite_upper.any():
+                clipped[:, finite_upper] = np.minimum(
+                    clipped[:, finite_upper],
+                    upper_arr[finite_upper].reshape(1, -1),
+                )
         return clipped
 
     def _recompute_errors_from_joints(
@@ -499,6 +602,53 @@ class PinocchioIKSolver:
                 metrics["position_error"] <= self.config.position_tolerance
                 and metrics["orientation_error"] <= self.config.orientation_tolerance
             )
+
+    def _compute_collision_flags_from_joints(self, joints: np.ndarray) -> np.ndarray | None:
+        if not self.collision_available:
+            return None
+
+        frame_count = int(joints.shape[0])
+        collision = np.zeros((frame_count,), dtype=np.bool_)
+        for frame_index in range(frame_count):
+            q = self.neutral.copy()
+            q[self.q_indices_arr] = joints[frame_index]
+            q = self._clip_q(q)
+            collision[frame_index] = self._evaluate_collision(q)[1]
+        return collision
+
+    def compute_collision_flags_from_joint_state_trajectory(
+        self,
+        *,
+        joint_names: list[str],
+        joint_positions: np.ndarray,
+    ) -> np.ndarray | None:
+        if not self.collision_available:
+            return None
+
+        names = [str(name) for name in joint_names]
+        positions = np.asarray(joint_positions, dtype=np.float64)
+        if positions.ndim != 2:
+            raise ValueError(f"joint_positions shape mismatch: expected [N, D], got {positions.shape}")
+        if positions.shape[1] != len(names):
+            raise ValueError(
+                f"joint_positions dim mismatch: expected D={len(names)}, got D={positions.shape[1]}"
+            )
+
+        frame_count = int(positions.shape[0])
+        if frame_count <= 0:
+            return np.zeros((0,), dtype=np.bool_)
+
+        q_indices = self._q_indices_for_joint_names(names)
+        lower = self.full_lower[q_indices]
+        upper = self.full_upper[q_indices]
+        collision = np.zeros((frame_count,), dtype=np.bool_)
+        for frame_index in range(frame_count):
+            q = self.neutral.copy()
+            if q_indices.size > 0:
+                q[q_indices] = positions[frame_index]
+                q = self._clip_q_indices(q, q_indices=q_indices, lower=lower, upper=upper)
+            collision[frame_index] = self._evaluate_collision(q)[1]
+        return collision
 
     def _retry_unreachable_frames(
         self,
@@ -564,22 +714,21 @@ class PinocchioIKSolver:
                 reachable_indices = np.sort(np.append(reachable_indices, frame_index))
 
     def _collision_penalty(self, q: np.ndarray) -> float:
-        if not self.collision_enabled or self.collision_model is None or self.collision_data is None:
+        if not self.collision_enabled:
             return 0.0
+        return self._evaluate_collision(q)[0]
+
+    def _evaluate_collision(self, q: np.ndarray) -> tuple[float, bool]:
+        if not self.collision_available or self.collision_model is None or self.collision_data is None:
+            return 0.0, False
         try:
-            pin.updateGeometryPlacements(
-                self.model,
-                self.data,
-                self.collision_model,
-                self.collision_data,
-                q,
-            )
-            pin.computeDistances(self.model, self.data, self.collision_model, self.collision_data)
+            self._update_collision_distances(q)
         except Exception:
-            return 0.0
+            return 0.0, False
 
         safe_distance = float(self.config.collision_safe_distance)
         penalty = 0.0
+        in_collision = False
         for result in self.collision_data.distanceResults:
             distance = getattr(result, "min_distance", None)
             if distance is None:
@@ -592,7 +741,8 @@ class PinocchioIKSolver:
             if value < safe_distance:
                 gap = safe_distance - value
                 penalty += gap * gap
-        return float(penalty)
+                in_collision = True
+        return float(penalty), bool(in_collision)
 
     def _target_from_pose(self, pose: np.ndarray):
         translation = np.asarray(pose[:3], dtype=np.float64)
@@ -603,14 +753,12 @@ class PinocchioIKSolver:
         return self.world_from_base * target
 
     def _clip_q(self, q: np.ndarray) -> np.ndarray:
-        clipped = q.astype(np.float64, copy=True)
-        active = clipped[self.q_indices_arr]
-        if self.has_lower.any():
-            active[self.has_lower] = np.maximum(active[self.has_lower], self.lower[self.has_lower])
-        if self.has_upper.any():
-            active[self.has_upper] = np.minimum(active[self.has_upper], self.upper[self.has_upper])
-        clipped[self.q_indices_arr] = active
-        return clipped
+        return self._clip_q_indices(
+            q,
+            q_indices=self.q_indices_arr,
+            lower=self.lower,
+            upper=self.upper,
+        )
 
     def _try_enable_collision(self) -> None:
         try:
@@ -622,13 +770,220 @@ class PinocchioIKSolver:
             )
             self.collision_model.addAllCollisionPairs()
             self.collision_data = pin.GeometryData(self.collision_model)
-            self.collision_enabled = len(self.collision_model.geometryObjects) > 0
+            self._configure_collision_pairs()
+            self.collision_available = self.collision_pair_count_active > 0
+            self.collision_enabled = bool(self.config.use_collision and self.collision_available)
         except Exception as exc:
+            self.collision_pair_mask = np.zeros((0,), dtype=np.bool_)
+            self.collision_pair_count_total = 0
+            self.collision_pair_count_active = 0
+            self.collision_pair_count_filtered = 0
+            self.collision_available = False
             self.collision_enabled = False
             self.collision_model = None
             self.collision_data = None
             if self.config.require_collision:
                 raise RuntimeError(f"failed to initialize collision model: {exc}") from exc
+
+    def _configure_collision_pairs(self) -> None:
+        if self.collision_model is None or self.collision_data is None:
+            self.collision_pair_mask = np.zeros((0,), dtype=np.bool_)
+            self.collision_pair_count_total = 0
+            self.collision_pair_count_active = 0
+            self.collision_pair_count_filtered = 0
+            return
+
+        total_pairs = int(len(self.collision_model.collisionPairs))
+        mask = np.ones((total_pairs,), dtype=np.bool_)
+        if total_pairs <= 0:
+            self.collision_pair_mask = mask
+            self.collision_pair_count_total = 0
+            self.collision_pair_count_active = 0
+            self.collision_pair_count_filtered = 0
+            return
+
+        if self.ignored_collision_links:
+            mask &= ~self._ignored_link_collision_pair_mask()
+        if self.config.collision_filter_adjacent_pairs:
+            mask &= ~self._adjacent_collision_pair_mask()
+        if self.config.collision_filter_neutral_touching_pairs:
+            mask &= ~self._neutral_touching_collision_pair_mask()
+
+        self.collision_pair_count_total = total_pairs
+        self.collision_pair_count_active = int(np.count_nonzero(mask))
+        self.collision_pair_count_filtered = int(total_pairs - self.collision_pair_count_active)
+        self._remove_filtered_collision_pairs(mask)
+
+    def _remove_filtered_collision_pairs(self, active_mask: np.ndarray) -> None:
+        if self.collision_model is None:
+            self.collision_pair_mask = np.zeros((0,), dtype=np.bool_)
+            return
+
+        if active_mask.ndim != 1:
+            raise ValueError(f"collision pair mask must be 1D, got shape {active_mask.shape}")
+
+        pair_count = len(self.collision_model.collisionPairs)
+        if active_mask.shape[0] != pair_count:
+            raise ValueError(
+                f"collision pair mask length mismatch: expected {pair_count}, got {active_mask.shape[0]}"
+            )
+
+        if pair_count <= 0:
+            self.collision_data = pin.GeometryData(self.collision_model)
+            self.collision_pair_mask = np.zeros((0,), dtype=np.bool_)
+            return
+
+        active_pairs = [
+            self.collision_model.collisionPairs[pair_index]
+            for pair_index, is_active in enumerate(active_mask)
+            if bool(is_active)
+        ]
+        self.collision_model.removeAllCollisionPairs()
+        for collision_pair in active_pairs:
+            self.collision_model.addCollisionPair(collision_pair)
+
+        self.collision_data = pin.GeometryData(self.collision_model)
+        self.collision_pair_mask = np.ones((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+
+    def _ignored_link_collision_pair_mask(self) -> np.ndarray:
+        if self.collision_model is None or not self.ignored_collision_links:
+            return np.zeros((0,), dtype=np.bool_)
+
+        mask = np.zeros((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+        for pair_index, pair in enumerate(self.collision_model.collisionPairs):
+            first_object = self.collision_model.geometryObjects[pair.first]
+            second_object = self.collision_model.geometryObjects[pair.second]
+            first_link = self._geometry_link_name(first_object.name)
+            second_link = self._geometry_link_name(second_object.name)
+            if first_link in self.ignored_collision_links or second_link in self.ignored_collision_links:
+                mask[pair_index] = True
+        return mask
+
+    def _adjacent_collision_pair_mask(self) -> np.ndarray:
+        if self.collision_model is None:
+            return np.zeros((0,), dtype=np.bool_)
+
+        mask = np.zeros((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+        for pair_index, pair in enumerate(self.collision_model.collisionPairs):
+            first_object = self.collision_model.geometryObjects[pair.first]
+            second_object = self.collision_model.geometryObjects[pair.second]
+            first_link = self._geometry_link_name(first_object.name)
+            second_link = self._geometry_link_name(second_object.name)
+            if (
+                first_link == second_link
+                or frozenset((first_link, second_link)) in self.adjacent_collision_link_pairs
+            ):
+                mask[pair_index] = True
+        return mask
+
+    def _neutral_touching_collision_pair_mask(self) -> np.ndarray:
+        if self.collision_model is None or self.collision_data is None:
+            return np.zeros((0,), dtype=np.bool_)
+
+        try:
+            self._update_collision_distances(self.neutral)
+        except Exception:
+            return np.zeros((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+
+        tolerance = float(self.config.collision_neutral_touching_tolerance)
+        mask = np.zeros((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+        for pair_index, result in enumerate(self.collision_data.distanceResults):
+            distance = getattr(result, "min_distance", None)
+            if distance is None:
+                distance = getattr(result, "minDistance", None)
+            if distance is None:
+                continue
+            value = float(distance)
+            if not np.isfinite(value):
+                continue
+            if value <= tolerance:
+                mask[pair_index] = True
+        return mask
+
+    def _update_collision_distances(self, q: np.ndarray) -> None:
+        if self.collision_model is None or self.collision_data is None:
+            raise RuntimeError("collision model is not initialized")
+        pin.updateGeometryPlacements(
+            self.model,
+            self.data,
+            self.collision_model,
+            self.collision_data,
+            q,
+        )
+        try:
+            pin.computeDistances(
+                self.model,
+                self.data,
+                self.collision_model,
+                self.collision_data,
+                q,
+            )
+        except Exception:
+            pin.computeDistances(self.collision_model, self.collision_data)
+
+    def _build_adjacent_collision_link_pairs(self) -> set[frozenset[str]]:
+        adjacent_pairs: set[frozenset[str]] = set()
+        try:
+            root = ET.parse(self.urdf_path).getroot()
+        except Exception:
+            return adjacent_pairs
+
+        for joint in root.findall("joint"):
+            parent = joint.find("parent")
+            child = joint.find("child")
+            if parent is None or child is None:
+                continue
+            parent_link = parent.attrib.get("link")
+            child_link = child.attrib.get("link")
+            if not parent_link or not child_link:
+                continue
+            adjacent_pairs.add(frozenset((str(parent_link), str(child_link))))
+        return adjacent_pairs
+
+    @staticmethod
+    def _geometry_link_name(geometry_name: str) -> str:
+        base_name = str(geometry_name)
+        prefix, separator, suffix = base_name.rpartition("_")
+        if separator and suffix.isdigit():
+            return prefix
+        return base_name
+
+    def _clip_q_indices(
+        self,
+        q: np.ndarray,
+        *,
+        q_indices: np.ndarray,
+        lower: np.ndarray,
+        upper: np.ndarray,
+    ) -> np.ndarray:
+        clipped = q.astype(np.float64, copy=True)
+        if q_indices.size == 0:
+            return clipped
+
+        values = clipped[q_indices]
+        finite_lower = np.isfinite(lower)
+        finite_upper = np.isfinite(upper)
+        if finite_lower.any():
+            values[finite_lower] = np.maximum(values[finite_lower], lower[finite_lower])
+        if finite_upper.any():
+            values[finite_upper] = np.minimum(values[finite_upper], upper[finite_upper])
+        clipped[q_indices] = values
+        return clipped
+
+    def _q_indices_for_joint_names(self, joint_names: list[str]) -> np.ndarray:
+        indices: list[int] = []
+        for name in joint_names:
+            cached = self._joint_q_index_cache.get(name)
+            if cached is None:
+                joint_id = self._require_joint_id(name)
+                if int(self.model.nqs[joint_id]) != 1 or int(self.model.nvs[joint_id]) != 1:
+                    raise ValueError(
+                        f"joint '{name}' is not 1-DoF (nq={self.model.nqs[joint_id]}, nv={self.model.nvs[joint_id]})."
+                    )
+                cached = int(self.model.idx_qs[joint_id])
+                self._joint_q_index_cache[name] = cached
+            indices.append(cached)
+        return np.asarray(indices, dtype=np.int64)
 
     def _require_joint_id(self, name: str) -> int:
         joint_id = int(self.model.getJointId(name))

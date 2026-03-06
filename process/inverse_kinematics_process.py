@@ -54,6 +54,8 @@ class InverseKinematicsProcess(BaseProcess):
 
         side_configs = self._resolve_side_configs()
         results: dict[str, Any] = {}
+        collision_inputs: dict[str, dict[str, Any]] = {}
+        collision_solvers: dict[str, PinocchioIKSolver] = {}
         for side_name, side_cfg in side_configs.items():
             side_poses_raw = eef_payload["poses"].get(side_name)
             if side_poses_raw is None:
@@ -71,17 +73,28 @@ class InverseKinematicsProcess(BaseProcess):
             solved = solver.solve_trajectory(
                 pose_vectors=side_poses[:, :6],
                 initial_joint_positions=initial_q,
+                compute_collision=False,
             )
+            collision_solvers[side_name] = solver
 
             arm_positions = np.asarray(solved["joint_positions"], dtype=np.float64)
             arm_joint_names = list(solved["joint_names"])
+            ekf_applied = bool(solved.get("ekf_applied", False))
             gripper_positions = None
+            gripper_ekf_applied = False
             if gripper_joint_names:
                 gripper_positions = self._build_gripper_targets(
                     side_sample=np.asarray(side_sample, dtype=np.float64),
                     side_cfg=side_cfg,
                     expected_joint_count=len(gripper_joint_names),
                 )
+                if bool(solver.config.use_joint_ekf_smoothing) and gripper_positions.shape[0] > 1:
+                    gripper_positions = self._smooth_gripper_targets_with_ekf(
+                        solver=solver,
+                        gripper_positions=gripper_positions,
+                        side_cfg=side_cfg,
+                    )
+                    gripper_ekf_applied = True
                 full_joint_names = arm_joint_names + gripper_joint_names
                 full_joint_positions = np.concatenate([arm_positions, gripper_positions], axis=1)
             else:
@@ -97,9 +110,17 @@ class InverseKinematicsProcess(BaseProcess):
             position_error = np.asarray(solved["position_error"], dtype=np.float64)
             orientation_error = np.asarray(solved["orientation_error"], dtype=np.float64)
             reachable = np.asarray(solved["reachable"], dtype=np.bool_)
-            mean_position_error = float(np.nanmean(position_error)) if position_error.size > 0 else 0.0
-            mean_orientation_error = float(np.nanmean(orientation_error)) if orientation_error.size > 0 else 0.0
-            reachable_ratio = float(np.mean(reachable)) if reachable.size > 0 else 0.0
+            collision = None
+            valid_error_mask = np.isfinite(position_error) & np.isfinite(orientation_error)
+            mean_position_error = self._finite_mean(position_error)
+            mean_orientation_error = self._finite_mean(orientation_error)
+            reachable_ratio = (
+                float(np.mean(reachable[valid_error_mask]))
+                if valid_error_mask.any()
+                else None
+            )
+            collision_count = None
+            collision_ratio = None
 
             results[side_name] = {
                 "joint_names": full_joint_names,
@@ -112,23 +133,54 @@ class InverseKinematicsProcess(BaseProcess):
                 "position_error": position_error.tolist(),
                 "orientation_error": orientation_error.tolist(),
                 "reachable": reachable.tolist(),
+                "collision": collision.tolist() if collision is not None else None,
                 "ik_error_mean": mean_position_error,
                 "mean_position_error": mean_position_error,
                 "mean_orientation_error": mean_orientation_error,
                 "reachable_ratio": reachable_ratio,
+                "collision_count": collision_count,
+                "collision_ratio": collision_ratio,
                 "limit_violation_count": int(limit_violation_count),
                 "continuity": continuity,
+                "valid_error_frame_count": int(np.count_nonzero(valid_error_mask)),
+                "invalid_error_frame_count": int(valid_error_mask.size - np.count_nonzero(valid_error_mask)),
                 "solver": {
                     "position_tolerance": float(solver.config.position_tolerance),
                     "orientation_tolerance": float(solver.config.orientation_tolerance),
+                    "early_stop_position_tolerance": float(solver.early_stop_position_tolerance),
+                    "early_stop_orientation_tolerance": float(solver.early_stop_orientation_tolerance),
                     "position_weight": float(solver.config.position_weight),
                     "orientation_weight": float(solver.config.orientation_weight),
                     "continuity_weight": float(solver.config.continuity_weight),
+                    "collision_available": bool(solver.collision_available),
+                    "error_computed_after_ekf": ekf_applied,
+                    "gripper_ekf_smoothing": gripper_ekf_applied,
                     "collision_enabled": bool(solver.collision_enabled),
+                    "collision_filter_adjacent_pairs": bool(solver.config.collision_filter_adjacent_pairs),
+                    "collision_filter_neutral_touching_pairs": bool(
+                        solver.config.collision_filter_neutral_touching_pairs
+                    ),
+                    "collision_neutral_touching_tolerance": float(
+                        solver.config.collision_neutral_touching_tolerance
+                    ),
+                    "collision_ignore_links": sorted(solver.ignored_collision_links),
+                    "collision_pair_count_total": int(solver.collision_pair_count_total),
+                    "collision_pair_count_active": int(solver.collision_pair_count_active),
+                    "collision_pair_count_filtered": int(solver.collision_pair_count_filtered),
                 },
             }
             if side_sample is not None:
                 results[side_name]["sample"] = np.asarray(side_sample, dtype=np.float64).tolist()
+            collision_inputs[side_name] = {
+                "joint_names": list(full_joint_names),
+                "joint_positions": np.asarray(full_joint_positions, dtype=np.float64),
+            }
+
+        self._apply_combined_collision_metrics(
+            results=results,
+            collision_inputs=collision_inputs,
+            collision_solvers=collision_solvers,
+        )
 
         payload = {
             "video_path": eef_payload.get("video_path", sample.get("video_path")),
@@ -138,6 +190,16 @@ class InverseKinematicsProcess(BaseProcess):
             "ik": results,
             "meta": {
                 "urdf_path": str(self.resolve_path(self.params["urdf_path"])),
+                "collision_mode": "combined_bimanual_state",
+                "collision_pair_filter_adjacent_pairs": bool(
+                    next(iter(collision_solvers.values())).config.collision_filter_adjacent_pairs
+                ) if collision_solvers else None,
+                "collision_pair_filter_neutral_touching_pairs": bool(
+                    next(iter(collision_solvers.values())).config.collision_filter_neutral_touching_pairs
+                ) if collision_solvers else None,
+                "collision_ignore_links": sorted(next(iter(collision_solvers.values())).ignored_collision_links)
+                if collision_solvers
+                else [],
             },
         }
         if isinstance(sample.get("eef_path"), str):
@@ -722,21 +784,147 @@ class InverseKinematicsProcess(BaseProcess):
             open_positions=open_list,
         )
 
+    def _smooth_gripper_targets_with_ekf(
+        self,
+        *,
+        solver: PinocchioIKSolver,
+        gripper_positions: np.ndarray,
+        side_cfg: dict[str, Any],
+    ) -> np.ndarray:
+        closed_positions = np.asarray(side_cfg.get("gripper_closed_positions"), dtype=np.float64).reshape(-1)
+        open_positions = np.asarray(side_cfg.get("gripper_open_positions"), dtype=np.float64).reshape(-1)
+        if closed_positions.shape[0] != gripper_positions.shape[1] or open_positions.shape[0] != gripper_positions.shape[1]:
+            raise ValueError(
+                "gripper_closed_positions/gripper_open_positions size mismatch with gripper target dimensions"
+            )
+        lower = np.minimum(closed_positions, open_positions)
+        upper = np.maximum(closed_positions, open_positions)
+        return solver.smooth_trajectory_with_ekf(
+            gripper_positions,
+            lower=lower,
+            upper=upper,
+        )
+
     def _count_limit_violations(self, *, positions: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> int:
         tol = 1.0e-8
         below = positions < (lower.reshape(1, -1) - tol)
         above = positions > (upper.reshape(1, -1) + tol)
         return int(np.count_nonzero(below | above))
 
-    def _continuity_statistics(self, positions: np.ndarray) -> dict[str, float]:
+    def _apply_combined_collision_metrics(
+        self,
+        *,
+        results: dict[str, Any],
+        collision_inputs: dict[str, dict[str, Any]],
+        collision_solvers: dict[str, PinocchioIKSolver],
+    ) -> None:
+        if not results:
+            return
+
+        collision_solver = next(
+            (solver for solver in collision_solvers.values() if solver.collision_available),
+            None,
+        )
+        if collision_solver is None:
+            for side_payload in results.values():
+                solver_map = side_payload.get("solver")
+                if isinstance(solver_map, dict):
+                    solver_map["collision_mode"] = "combined_bimanual_state"
+            return
+
+        combined_joint_names: list[str] = []
+        combined_joint_positions: list[np.ndarray] = []
+        side_frame_counts: dict[str, int] = {}
+        frame_count = 0
+        for side_name, side_payload in results.items():
+            collision_input = collision_inputs.get(side_name)
+            if not isinstance(collision_input, dict):
+                continue
+
+            joint_names = collision_input.get("joint_names")
+            if not isinstance(joint_names, list):
+                continue
+
+            positions = np.asarray(collision_input.get("joint_positions"), dtype=np.float64)
+            if positions.ndim != 2:
+                continue
+            if positions.shape[1] != len(joint_names):
+                raise ValueError(
+                    f"combined collision joint dimension mismatch for side '{side_name}': "
+                    f"expected {len(joint_names)}, got {positions.shape[1]}"
+                )
+            side_frame_counts[side_name] = int(positions.shape[0])
+            frame_count = max(frame_count, int(positions.shape[0]))
+            combined_joint_names.extend(str(name) for name in joint_names)
+            combined_joint_positions.append(positions)
+
+            solver_map = side_payload.get("solver")
+            if isinstance(solver_map, dict):
+                solver_map["collision_mode"] = "combined_bimanual_state"
+
+        if frame_count <= 0 or not combined_joint_positions:
+            return
+
+        aligned_positions = [
+            self._align_joint_trajectory_for_collision(positions, frame_count)
+            for positions in combined_joint_positions
+        ]
+        combined_collision = collision_solver.compute_collision_flags_from_joint_state_trajectory(
+            joint_names=combined_joint_names,
+            joint_positions=np.concatenate(aligned_positions, axis=1),
+        )
+        for side_name, side_payload in results.items():
+            side_frame_count = side_frame_counts.get(side_name, 0)
+            side_collision = None
+            if combined_collision is not None and side_frame_count > 0:
+                side_collision = combined_collision[:side_frame_count]
+            collision_count, collision_ratio = self._summarize_collision(side_collision)
+            side_payload["collision"] = side_collision.tolist() if side_collision is not None else None
+            side_payload["collision_count"] = collision_count
+            side_payload["collision_ratio"] = collision_ratio
+
+    @staticmethod
+    def _align_joint_trajectory_for_collision(positions: np.ndarray, frame_count: int) -> np.ndarray:
+        trajectory = np.asarray(positions, dtype=np.float64)
+        if trajectory.ndim != 2:
+            raise ValueError(f"trajectory shape mismatch: expected [N, D], got {trajectory.shape}")
+        if frame_count <= trajectory.shape[0]:
+            return trajectory[:frame_count].copy()
+        if trajectory.shape[0] == 0:
+            return np.zeros((frame_count, trajectory.shape[1]), dtype=np.float64)
+        pad_count = frame_count - trajectory.shape[0]
+        tail = np.repeat(trajectory[-1:, :], pad_count, axis=0)
+        return np.concatenate([trajectory, tail], axis=0)
+
+    def _continuity_statistics(self, positions: np.ndarray) -> dict[str, float | None]:
         if positions.shape[0] <= 1:
             return {"max_abs_delta": 0.0, "mean_abs_delta": 0.0}
         delta = np.diff(positions, axis=0)
         abs_delta = np.abs(delta)
+        finite = abs_delta[np.isfinite(abs_delta)]
+        if finite.size == 0:
+            return {"max_abs_delta": None, "mean_abs_delta": None}
         return {
-            "max_abs_delta": float(np.nanmax(abs_delta)),
-            "mean_abs_delta": float(np.nanmean(abs_delta)),
+            "max_abs_delta": float(np.max(finite)),
+            "mean_abs_delta": float(np.mean(finite)),
         }
+
+    @staticmethod
+    def _finite_mean(values: np.ndarray) -> float | None:
+        arr = np.asarray(values, dtype=np.float64).reshape(-1)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return None
+        return float(np.mean(finite))
+
+    @staticmethod
+    def _summarize_collision(collision: np.ndarray | None) -> tuple[int | None, float | None]:
+        if collision is None:
+            return None, None
+        frame_count = int(collision.shape[0])
+        collision_count = int(np.count_nonzero(collision))
+        collision_ratio = float(collision_count / frame_count) if frame_count > 0 else None
+        return collision_count, collision_ratio
 
     def _resolve_side_configs(self) -> dict[str, dict[str, Any]]:
         configured = self.params.get("sides")
@@ -786,6 +974,13 @@ class InverseKinematicsProcess(BaseProcess):
         solver_params = dict(self.params.get("solver", {}))
         solver_params.update(dict(side_cfg.get("solver", {})))
         collision_params = dict(solver_params.get("collision", {}))
+        ignore_links = collision_params.get("ignore_links", [])
+        if isinstance(ignore_links, str):
+            ignore_links = [ignore_links]
+        if not isinstance(ignore_links, list):
+            raise TypeError("collision.ignore_links must be a string or list of strings")
+        early_stop_position_tolerance = solver_params.get("early_stop_position_tolerance")
+        early_stop_orientation_tolerance = solver_params.get("early_stop_orientation_tolerance")
         return IKConfig(
             position_weight=float(solver_params.get("position_weight", 8.0)),
             orientation_weight=float(solver_params.get("orientation_weight", 1.0)),
@@ -796,9 +991,23 @@ class InverseKinematicsProcess(BaseProcess):
             max_frame_delta=float(solver_params.get("max_frame_delta", 0.35)),
             position_tolerance=float(solver_params.get("position_tolerance", 0.02)),
             orientation_tolerance=float(solver_params.get("orientation_tolerance", 0.25)),
+            early_stop_position_tolerance=(
+                float(early_stop_position_tolerance) if early_stop_position_tolerance is not None else None
+            ),
+            early_stop_orientation_tolerance=(
+                float(early_stop_orientation_tolerance) if early_stop_orientation_tolerance is not None else None
+            ),
             collision_weight=float(collision_params.get("weight", 5.0)),
             collision_safe_distance=float(collision_params.get("safe_distance", 0.01)),
             collision_check_interval=int(collision_params.get("check_interval", 2)),
+            collision_filter_adjacent_pairs=bool(collision_params.get("filter_adjacent_pairs", True)),
+            collision_filter_neutral_touching_pairs=bool(
+                collision_params.get("filter_neutral_touching_pairs", True)
+            ),
+            collision_neutral_touching_tolerance=float(
+                collision_params.get("neutral_touching_tolerance", 1.0e-9)
+            ),
+            collision_ignore_links=tuple(str(name) for name in ignore_links),
             use_collision=bool(collision_params.get("enabled", False)),
             require_collision=bool(collision_params.get("required", False)),
             use_joint_ekf_smoothing=bool(solver_params.get("use_joint_ekf_smoothing", True)),

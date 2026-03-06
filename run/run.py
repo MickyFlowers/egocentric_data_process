@@ -380,13 +380,13 @@ class PipelineManager:
         render_root = Path(layout["render_root"])
         render_meta_path = Path(layout["render_meta_path"])
         completed_ids = self.manifest.completed_sample_ids()
-        rendered_entries: list[dict[str, str]] = []
+        rendered_entries: list = []
         for sample_id in completed_ids:
             relative = Path(sample_id)
             render_video_path = (render_root / relative.parent / f"{relative.stem}.mp4").resolve()
             if not render_video_path.exists():
                 continue
-            rendered_entries.append({"sample_id": sample_id})
+            rendered_entries.append(sample_id)
 
         try:
             atomic_write_json(render_meta_path, rendered_entries, indent=2, sort_keys=True)

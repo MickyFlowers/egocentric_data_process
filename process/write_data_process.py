@@ -100,6 +100,8 @@ class WriteDataProcess(BaseProcess):
                 "right_joint_position": pa.array(columns["right_joint_position"], type=pa.list_(pa.float32())),
                 "left_reachable": pa.array(columns["left_reachable"], type=pa.bool_()),
                 "right_reachable": pa.array(columns["right_reachable"], type=pa.bool_()),
+                "left_collision": pa.array(columns["left_collision"], type=pa.bool_()),
+                "right_collision": pa.array(columns["right_collision"], type=pa.bool_()),
                 "left_position_error": pa.array(columns["left_position_error"], type=pa.float32()),
                 "right_position_error": pa.array(columns["right_position_error"], type=pa.float32()),
                 "left_orientation_error": pa.array(columns["left_orientation_error"], type=pa.float32()),
@@ -131,6 +133,8 @@ class WriteDataProcess(BaseProcess):
         right_joint_position = self._extract_ik_vector_sequence(ik_payload, side="right", key="joint_positions")
         left_reachable = self._extract_ik_bool_sequence(ik_payload, side="left", key="reachable")
         right_reachable = self._extract_ik_bool_sequence(ik_payload, side="right", key="reachable")
+        left_collision = self._extract_ik_bool_sequence(ik_payload, side="left", key="collision")
+        right_collision = self._extract_ik_bool_sequence(ik_payload, side="right", key="collision")
         left_position_error = self._extract_ik_scalar_sequence(ik_payload, side="left", key="position_error")
         right_position_error = self._extract_ik_scalar_sequence(ik_payload, side="right", key="position_error")
         left_orientation_error = self._extract_ik_scalar_sequence(ik_payload, side="left", key="orientation_error")
@@ -145,6 +149,8 @@ class WriteDataProcess(BaseProcess):
             len(right_joint_position),
             len(left_reachable),
             len(right_reachable),
+            len(left_collision),
+            len(right_collision),
             len(left_position_error),
             len(right_position_error),
             len(left_orientation_error),
@@ -177,6 +183,8 @@ class WriteDataProcess(BaseProcess):
             "right_joint_position": self._pad_sequence(right_joint_position, frame_count),
             "left_reachable": self._pad_sequence(left_reachable, frame_count),
             "right_reachable": self._pad_sequence(right_reachable, frame_count),
+            "left_collision": self._pad_sequence(left_collision, frame_count),
+            "right_collision": self._pad_sequence(right_collision, frame_count),
             "left_position_error": self._pad_sequence(left_position_error, frame_count),
             "right_position_error": self._pad_sequence(right_position_error, frame_count),
             "left_orientation_error": self._pad_sequence(left_orientation_error, frame_count),
@@ -230,7 +238,13 @@ class WriteDataProcess(BaseProcess):
             "image_width": image_width,
             "intrinsics": intrinsics,
             "camera_extrinsics": camera_extrinsics,
-            "ik_urdf_path": ik_meta.get("urdf_path"),
+            "ik_collision_mode": ik_meta.get("collision_mode"),
+            "ik_collision_pair_filter_adjacent_pairs": ik_meta.get("collision_pair_filter_adjacent_pairs"),
+            "ik_collision_pair_filter_neutral_touching_pairs": ik_meta.get(
+                "collision_pair_filter_neutral_touching_pairs"
+            ),
+            "ik_collision_ignore_links": ik_meta.get("collision_ignore_links"),
+            # "ik_urdf_path": ik_meta.get("urdf_path"),
         }
 
         output.update(self._build_ik_side_summary("left", ik_section.get("left")))
@@ -242,12 +256,24 @@ class WriteDataProcess(BaseProcess):
             return {
                 f"{side}_joint_names": [],
                 f"{side}_reachable_ratio": None,
+                f"{side}_collision_count": None,
+                f"{side}_collision_ratio": None,
                 f"{side}_mean_position_error": None,
                 f"{side}_mean_orientation_error": None,
+                f"{side}_valid_error_frame_count": None,
+                f"{side}_invalid_error_frame_count": None,
                 f"{side}_limit_violation_count": None,
                 f"{side}_continuity_max_abs_delta": None,
                 f"{side}_continuity_mean_abs_delta": None,
+                f"{side}_solver_collision_available": None,
                 f"{side}_solver_collision_enabled": None,
+                f"{side}_solver_collision_mode": None,
+                f"{side}_solver_collision_filter_adjacent_pairs": None,
+                f"{side}_solver_collision_filter_neutral_touching_pairs": None,
+                f"{side}_solver_collision_ignore_links": [],
+                f"{side}_solver_collision_pair_count_total": None,
+                f"{side}_solver_collision_pair_count_active": None,
+                f"{side}_solver_collision_pair_count_filtered": None,
             }
 
         continuity = side_payload.get("continuity")
@@ -261,13 +287,47 @@ class WriteDataProcess(BaseProcess):
         return {
             f"{side}_joint_names": joint_names,
             f"{side}_reachable_ratio": self._safe_float(side_payload.get("reachable_ratio")),
+            f"{side}_collision_count": self._safe_int(side_payload.get("collision_count")),
+            f"{side}_collision_ratio": self._safe_float(side_payload.get("collision_ratio")),
             f"{side}_mean_position_error": self._safe_float(side_payload.get("mean_position_error")),
             f"{side}_mean_orientation_error": self._safe_float(side_payload.get("mean_orientation_error")),
+            f"{side}_valid_error_frame_count": self._safe_int(side_payload.get("valid_error_frame_count")),
+            f"{side}_invalid_error_frame_count": self._safe_int(side_payload.get("invalid_error_frame_count")),
             f"{side}_limit_violation_count": self._safe_int(side_payload.get("limit_violation_count")),
             f"{side}_continuity_max_abs_delta": self._safe_float(continuity_map.get("max_abs_delta")),
             f"{side}_continuity_mean_abs_delta": self._safe_float(continuity_map.get("mean_abs_delta")),
+            f"{side}_solver_collision_available": (
+                bool(solver_map.get("collision_available")) if "collision_available" in solver_map else None
+            ),
             f"{side}_solver_collision_enabled": (
                 bool(solver_map.get("collision_enabled")) if "collision_enabled" in solver_map else None
+            ),
+            f"{side}_solver_collision_mode": (
+                str(solver_map.get("collision_mode")) if solver_map.get("collision_mode") is not None else None
+            ),
+            f"{side}_solver_collision_filter_adjacent_pairs": (
+                bool(solver_map.get("collision_filter_adjacent_pairs"))
+                if "collision_filter_adjacent_pairs" in solver_map
+                else None
+            ),
+            f"{side}_solver_collision_filter_neutral_touching_pairs": (
+                bool(solver_map.get("collision_filter_neutral_touching_pairs"))
+                if "collision_filter_neutral_touching_pairs" in solver_map
+                else None
+            ),
+            f"{side}_solver_collision_ignore_links": (
+                list(solver_map.get("collision_ignore_links"))
+                if isinstance(solver_map.get("collision_ignore_links"), list)
+                else []
+            ),
+            f"{side}_solver_collision_pair_count_total": self._safe_int(
+                solver_map.get("collision_pair_count_total")
+            ),
+            f"{side}_solver_collision_pair_count_active": self._safe_int(
+                solver_map.get("collision_pair_count_active")
+            ),
+            f"{side}_solver_collision_pair_count_filtered": self._safe_int(
+                solver_map.get("collision_pair_count_filtered")
             ),
         }
 

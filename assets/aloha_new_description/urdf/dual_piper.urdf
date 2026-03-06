@@ -22,7 +22,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/base_link.STL" />
+                <mesh filename="package://aloha_new_description/meshes/base_link_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -47,7 +47,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link1.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link1_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -73,7 +73,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link2.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link2_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -99,7 +99,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link3.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link3_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -125,7 +125,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link4.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link4_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -151,7 +151,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 -3.14" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link5.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link5_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -278,7 +278,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link7.STL" />
+                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link7_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -307,7 +307,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link8.STL" />
+                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link8_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -333,7 +333,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/base_link.STL" />
+                <mesh filename="package://aloha_new_description/meshes/base_link_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -358,7 +358,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link1.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link1_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -384,7 +384,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link2.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link2_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -410,7 +410,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link3.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link3_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -436,7 +436,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link4.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link4_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -462,7 +462,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 -3.14" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/link5.STL" />
+                <mesh filename="package://aloha_new_description/meshes/link5_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -589,7 +589,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link7.STL" />
+                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link7_col.STL" />
             </geometry>
         </collision>
     </link>
@@ -618,7 +618,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link8.STL" />
+                <mesh filename="package://aloha_new_description/meshes/piper_slave_meshes/link8_col.STL" />
             </geometry>
         </collision>
     </link>
