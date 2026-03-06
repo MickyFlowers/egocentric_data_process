@@ -12,3 +12,6 @@ pip install chumpy --no-build-isolation
 python3 -m pip install --upgrade -r requirements.txt
 
 python3 scripts/patch_chumpy.py
+
+conda install -c conda-forge pinocchio hpp-fcl
+pip install genesis-world
