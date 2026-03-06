@@ -779,7 +779,7 @@ class _GenesisSegmentationRenderer:
         if _GenesisSegmentationRenderer._initialized:
             return
         backend = self._gs.gpu if "gpu" in self._init_backend else self._gs.cpu
-        self._gs.init(backend=backend)
+        self._gs.init(backend=backend, headless=True)
         _GenesisSegmentationRenderer._initialized = True
 
     def _create_scene(self) -> Any:
