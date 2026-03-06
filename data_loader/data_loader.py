@@ -162,7 +162,7 @@ class GlobDataLoader(BaseDataLoader):
 
 
 @register_data_loader("egodex")
-@register_data_loader("ego_dex")
+# @register_data_loader("ego_dex")
 class EgoDexDataLoader(BaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
         input_dir_value = self.params.get("input_dir") or self.params.get("input_root")

@@ -164,6 +164,9 @@ class InverseKinematicsProcess(BaseProcess):
                         solver.config.collision_neutral_touching_tolerance
                     ),
                     "collision_ignore_links": sorted(solver.ignored_collision_links),
+                    "collision_force_include_link_pairs": [
+                        list(pair) for pair in solver.config.collision_force_include_link_pairs
+                    ],
                     "collision_pair_count_total": int(solver.collision_pair_count_total),
                     "collision_pair_count_active": int(solver.collision_pair_count_active),
                     "collision_pair_count_filtered": int(solver.collision_pair_count_filtered),
@@ -200,6 +203,9 @@ class InverseKinematicsProcess(BaseProcess):
                 "collision_ignore_links": sorted(next(iter(collision_solvers.values())).ignored_collision_links)
                 if collision_solvers
                 else [],
+                "collision_force_include_link_pairs": [
+                    list(pair) for pair in next(iter(collision_solvers.values())).config.collision_force_include_link_pairs
+                ] if collision_solvers else [],
             },
         }
         if isinstance(sample.get("eef_path"), str):
@@ -979,6 +985,24 @@ class InverseKinematicsProcess(BaseProcess):
             ignore_links = [ignore_links]
         if not isinstance(ignore_links, list):
             raise TypeError("collision.ignore_links must be a string or list of strings")
+        force_include_link_pairs = collision_params.get("force_include_link_pairs", [])
+        if not isinstance(force_include_link_pairs, list):
+            raise TypeError("collision.force_include_link_pairs must be a list of link pairs")
+        normalized_force_pairs: list[tuple[str, str]] = []
+        for pair_index, pair in enumerate(force_include_link_pairs):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise TypeError(
+                    "collision.force_include_link_pairs items must be length-2 lists/tuples "
+                    f"(invalid index {pair_index})"
+                )
+            first = str(pair[0]).strip()
+            second = str(pair[1]).strip()
+            if not first or not second or first == second:
+                raise ValueError(
+                    "collision.force_include_link_pairs items must contain two distinct non-empty link names "
+                    f"(invalid index {pair_index})"
+                )
+            normalized_force_pairs.append((first, second))
         early_stop_position_tolerance = solver_params.get("early_stop_position_tolerance")
         early_stop_orientation_tolerance = solver_params.get("early_stop_orientation_tolerance")
         return IKConfig(
@@ -1008,6 +1032,7 @@ class InverseKinematicsProcess(BaseProcess):
                 collision_params.get("neutral_touching_tolerance", 1.0e-9)
             ),
             collision_ignore_links=tuple(str(name) for name in ignore_links),
+            collision_force_include_link_pairs=tuple(normalized_force_pairs),
             use_collision=bool(collision_params.get("enabled", False)),
             require_collision=bool(collision_params.get("required", False)),
             use_joint_ekf_smoothing=bool(solver_params.get("use_joint_ekf_smoothing", True)),

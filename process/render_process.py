@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,10 +18,20 @@ class RenderFilterProcess(BaseProcess):
     def run(self, sample: dict[str, Any], context: Any) -> dict[str, Any]:
         reachable_threshold = float(self.params.get("reachable_ratio_threshold", 0.9))
         collision_threshold = float(self.params.get("collision_ratio_threshold", 0.05))
+        missing_reachable_default = self._resolve_missing_reachable_default()
         meta_data = self._resolve_meta_data(sample)
 
         left_ratio = self._safe_float(meta_data.get("left_reachable_ratio"))
         right_ratio = self._safe_float(meta_data.get("right_reachable_ratio"))
+        left_ratio, right_ratio = self._normalize_missing_reachable_ratios(
+            left_ratio=left_ratio,
+            right_ratio=right_ratio,
+            default_value=missing_reachable_default,
+        )
+        if meta_data.get("left_reachable_ratio") is None and left_ratio is not None:
+            meta_data["left_reachable_ratio"] = float(left_ratio)
+        if meta_data.get("right_reachable_ratio") is None and right_ratio is not None:
+            meta_data["right_reachable_ratio"] = float(right_ratio)
         left_collision_ratio = self._safe_float(meta_data.get("left_collision_ratio"))
         right_collision_ratio = self._safe_float(meta_data.get("right_collision_ratio"))
         passed = (
@@ -43,6 +54,29 @@ class RenderFilterProcess(BaseProcess):
         sample["render_filter_right_collision_ratio"] = right_collision_ratio
         sample["last_process"] = self.name
         return sample
+
+    def _resolve_missing_reachable_default(self) -> float:
+        raw_value = self.params.get("missing_reachable_ratio_default", 1.0)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("render_filter requires finite params.missing_reachable_ratio_default") from exc
+        if not np.isfinite(value):
+            raise ValueError("render_filter requires finite params.missing_reachable_ratio_default")
+        return value
+
+    @staticmethod
+    def _normalize_missing_reachable_ratios(
+        *,
+        left_ratio: float | None,
+        right_ratio: float | None,
+        default_value: float,
+    ) -> tuple[float | None, float | None]:
+        if left_ratio is None and right_ratio is not None:
+            return float(default_value), right_ratio
+        if right_ratio is None and left_ratio is not None:
+            return left_ratio, float(default_value)
+        return left_ratio, right_ratio
 
     def _resolve_meta_data(self, sample: dict[str, Any]) -> dict[str, Any]:
         cached = sample.get("meta_data")
@@ -84,6 +118,16 @@ class TrajectoryPayload:
     @property
     def frame_count(self) -> int:
         return int(self.joint_positions.shape[0])
+
+
+@dataclass(frozen=True)
+class ClipLightConfig:
+    enabled: bool
+    ambient_light: tuple[float, float, float]
+    xy_range: tuple[float, float]
+    z_range: tuple[float, float]
+    intensity_range: tuple[float, float]
+    seed: int
 
 
 @register_process("render")
@@ -139,6 +183,20 @@ class RenderProcess(BaseProcess):
             source_w=source_w,
             default_fov_deg=default_fov_deg,
             backend=backend,
+        )
+        renderer.prepare_clip(
+            clip_id=self._resolve_clip_id(
+                sample=sample,
+                trajectory_path=trajectory_path,
+                video_path=video_path,
+            ),
+            joint_positions=trajectory.joint_positions[0],
+            left_gripper_signal=(
+                float(trajectory.left_gripper_signal[0]) if trajectory.left_gripper_signal is not None else None
+            ),
+            right_gripper_signal=(
+                float(trajectory.right_gripper_signal[0]) if trajectory.right_gripper_signal is not None else None
+            ),
         )
         intrinsics_source_h = trajectory.source_image_height if trajectory.source_image_height else source_h
         intrinsics_source_w = trajectory.source_image_width if trajectory.source_image_width else source_w
@@ -230,6 +288,7 @@ class RenderProcess(BaseProcess):
     ) -> tuple["_GenesisSegmentationRenderer", int, int]:
         target_h, target_w = self._resolve_target_size(source_h=source_h, source_w=source_w)
         camera_near, camera_far = self._resolve_camera_clip_planes()
+        clip_light_config = self._resolve_clip_light_config()
         current_spec = {
             "urdf_path": str(Path(urdf_path).resolve()),
             "joint_names": tuple(joint_names),
@@ -239,6 +298,12 @@ class RenderProcess(BaseProcess):
             "width": int(target_w),
             "camera_near": float(camera_near),
             "camera_far": float(camera_far),
+            "clip_light_enabled": bool(clip_light_config.enabled),
+            "clip_light_ambient": tuple(float(value) for value in clip_light_config.ambient_light),
+            "clip_light_xy_range": tuple(float(value) for value in clip_light_config.xy_range),
+            "clip_light_z_range": tuple(float(value) for value in clip_light_config.z_range),
+            "clip_light_intensity_range": tuple(float(value) for value in clip_light_config.intensity_range),
+            "clip_light_seed": int(clip_light_config.seed),
         }
 
         if self._renderer is not None and self._renderer_spec == current_spec:
@@ -254,6 +319,7 @@ class RenderProcess(BaseProcess):
             init_backend=backend,
             camera_near=camera_near,
             camera_far=camera_far,
+            clip_light_config=clip_light_config,
         )
         self._renderer_spec = dict(current_spec)
         return self._renderer, target_h, target_w
@@ -266,6 +332,40 @@ class RenderProcess(BaseProcess):
         if not np.isfinite(camera_far) or camera_far <= camera_near:
             raise ValueError("render process requires params.camera_far > params.camera_near")
         return camera_near, camera_far
+
+    def _resolve_clip_light_config(self) -> ClipLightConfig:
+        enabled = bool(self.params.get("randomize_clip_light", True))
+        ambient_light = self._resolve_rgb_triplet(
+            self.params.get("ambient_light", (0.08, 0.08, 0.08)),
+            name="ambient_light",
+        )
+        xy_range = self._resolve_xy_range(
+            self.params.get("clip_light_xy_range", (0.16, 0.12)),
+            name="clip_light_xy_range",
+        )
+        z_range = self._resolve_numeric_range(
+            self.params.get("clip_light_height_range", (0.20, 0.34)),
+            name="clip_light_height_range",
+            minimum=0.01,
+        )
+        intensity_range = self._resolve_numeric_range(
+            self.params.get("clip_light_intensity_range", (18.0, 30.0)),
+            name="clip_light_intensity_range",
+            minimum=0.01,
+        )
+        seed_raw = self.params.get("light_seed", 0)
+        try:
+            seed = int(0 if seed_raw is None else seed_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("render process requires integer params.light_seed") from exc
+        return ClipLightConfig(
+            enabled=enabled,
+            ambient_light=ambient_light,
+            xy_range=xy_range,
+            z_range=z_range,
+            intensity_range=intensity_range,
+            seed=seed,
+        )
 
     def _resolve_target_size(self, *, source_h: int, source_w: int) -> tuple[int, int]:
         configured_height = self.params.get("render_height")
@@ -699,6 +799,63 @@ class RenderProcess(BaseProcess):
             return None
         return number
 
+    @staticmethod
+    def _resolve_clip_id(
+        *,
+        sample: dict[str, Any],
+        trajectory_path: str,
+        video_path: str,
+    ) -> str:
+        for candidate in (
+            sample.get("sample_id"),
+            sample.get("clip_id"),
+            sample.get("episode_id"),
+            trajectory_path,
+            video_path,
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        return "render_clip"
+
+    @staticmethod
+    def _resolve_rgb_triplet(value: Any, *, name: str) -> tuple[float, float, float]:
+        if isinstance(value, (int, float)):
+            channel = float(value)
+            rgb = (channel, channel, channel)
+        else:
+            if not isinstance(value, (list, tuple)) or len(value) != 3:
+                raise ValueError(f"render process requires params.{name} as scalar or length-3 sequence")
+            rgb = tuple(float(channel) for channel in value)
+        if any((not np.isfinite(channel)) or channel < 0.0 or channel > 1.0 for channel in rgb):
+            raise ValueError(f"render process requires params.{name} within [0, 1]")
+        return rgb
+
+    @staticmethod
+    def _resolve_xy_range(value: Any, *, name: str) -> tuple[float, float]:
+        if isinstance(value, (int, float)):
+            x_range = float(value)
+            y_range = float(value)
+        else:
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError(f"render process requires params.{name} as scalar or length-2 sequence")
+            x_range = float(value[0])
+            y_range = float(value[1])
+        if not np.isfinite(x_range) or not np.isfinite(y_range) or x_range < 0.0 or y_range < 0.0:
+            raise ValueError(f"render process requires non-negative finite params.{name}")
+        return x_range, y_range
+
+    @staticmethod
+    def _resolve_numeric_range(value: Any, *, name: str, minimum: float) -> tuple[float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise ValueError(f"render process requires params.{name} as a length-2 sequence")
+        low = float(value[0])
+        high = float(value[1])
+        if not np.isfinite(low) or not np.isfinite(high) or low < minimum or high < low:
+            raise ValueError(
+                f"render process requires params.{name} to satisfy {minimum} <= min <= max with finite values"
+            )
+        return low, high
+
 
 class _GenesisSegmentationRenderer:
     _initialized = False
@@ -715,15 +872,18 @@ class _GenesisSegmentationRenderer:
         init_backend: str,
         camera_near: float,
         camera_far: float,
+        clip_light_config: ClipLightConfig,
     ) -> None:
         try:
             import genesis as gs
+            from genesis.ext import pyrender
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "genesis is required for render process. Install it with `python -m pip install genesis-world`."
             ) from exc
 
         self._gs = gs
+        self._pyrender = pyrender
         self._joint_names = list(joint_names)
         self._width = int(width)
         self._height = int(height)
@@ -731,6 +891,9 @@ class _GenesisSegmentationRenderer:
         self._init_backend = str(init_backend).lower()
         self._camera_near = float(camera_near)
         self._camera_far = float(camera_far)
+        self._clip_light_config = clip_light_config
+        self._clip_light = None
+        self._clip_light_node = None
         self._ensure_initialized()
         self._scene = self._create_scene()
         self._robot = self._scene.add_entity(
@@ -766,6 +929,26 @@ class _GenesisSegmentationRenderer:
         )
         self._scene.build(n_envs=1)
 
+    def prepare_clip(
+        self,
+        *,
+        clip_id: str,
+        joint_positions: np.ndarray,
+        left_gripper_signal: float | None,
+        right_gripper_signal: float | None,
+    ) -> None:
+        if not self._clip_light_config.enabled:
+            return
+        self._set_joint_positions(np.asarray(joint_positions, dtype=np.float32).reshape(-1))
+        self._set_gripper_positions(
+            left_gripper_signal=left_gripper_signal,
+            right_gripper_signal=right_gripper_signal,
+        )
+        self._scene.visualizer.update_visual_states(force_render=True)
+        anchor = self._resolve_clip_light_anchor()
+        light_position, light_intensity = self._sample_clip_light(clip_id=clip_id, anchor=anchor)
+        self._apply_clip_light(position=light_position, intensity=light_intensity)
+
     def render_rgb_and_mask(
         self,
         *,
@@ -790,10 +973,17 @@ class _GenesisSegmentationRenderer:
     def close(self) -> None:
         if self._scene is None:
             return
+        if self._clip_light_node is not None:
+            try:
+                self._scene.visualizer.context.remove_node(self._clip_light_node)
+            except Exception:
+                pass
         self._scene.destroy()
         self._scene = None
         self._camera = None
         self._robot = None
+        self._clip_light = None
+        self._clip_light_node = None
 
     def _ensure_initialized(self) -> None:
         if _GenesisSegmentationRenderer._initialized:
@@ -803,6 +993,10 @@ class _GenesisSegmentationRenderer:
         _GenesisSegmentationRenderer._initialized = True
 
     def _create_scene(self) -> Any:
+        vis_kwargs: dict[str, Any] = {"segmentation_level": "entity"}
+        if self._clip_light_config.enabled:
+            vis_kwargs["ambient_light"] = self._clip_light_config.ambient_light
+            vis_kwargs["lights"] = []
         return self._gs.Scene(
             sim_options=self._gs.options.SimOptions(gravity=(0.0, 0.0, 0.0)),
             rigid_options=self._gs.options.RigidOptions(
@@ -814,10 +1008,64 @@ class _GenesisSegmentationRenderer:
                 enable_adjacent_collision=False,
                 disable_constraint=True,
             ),
-            vis_options=self._gs.options.VisOptions(segmentation_level="entity"),
+            vis_options=self._gs.options.VisOptions(**vis_kwargs),
             renderer=self._gs.options.renderers.Rasterizer(),
             show_viewer=False,
         )
+
+    def _resolve_clip_light_anchor(self) -> np.ndarray:
+        default_anchor = np.asarray((0.0, 0.0, 0.75), dtype=np.float32)
+        try:
+            pyrender_scene = self._scene.visualizer.context._scene
+            bounds = np.asarray(pyrender_scene.bounds, dtype=np.float32)
+        except Exception:
+            return default_anchor
+        if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)):
+            return default_anchor
+        center_xy = 0.5 * (bounds[0, :2] + bounds[1, :2])
+        return np.asarray((center_xy[0], center_xy[1], bounds[1, 2]), dtype=np.float32)
+
+    def _sample_clip_light(self, *, clip_id: str, anchor: np.ndarray) -> tuple[np.ndarray, float]:
+        rng = np.random.default_rng(self._seed_for_clip(clip_id))
+        x_range, y_range = self._clip_light_config.xy_range
+        z_low, z_high = self._clip_light_config.z_range
+        intensity_low, intensity_high = self._clip_light_config.intensity_range
+        offset = np.asarray(
+            (
+                rng.uniform(-x_range, x_range),
+                rng.uniform(-y_range, y_range),
+                rng.uniform(z_low, z_high),
+            ),
+            dtype=np.float32,
+        )
+        position = np.asarray(anchor, dtype=np.float32).reshape(3) + offset
+        intensity = float(rng.uniform(intensity_low, intensity_high))
+        return position, intensity
+
+    def _apply_clip_light(self, *, position: np.ndarray, intensity: float) -> None:
+        context = self._scene.visualizer.context
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, 3] = np.asarray(position, dtype=np.float32).reshape(3)
+        if self._clip_light is None:
+            self._clip_light = self._pyrender.PointLight(
+                color=np.asarray((1.0, 1.0, 1.0), dtype=np.float32),
+                intensity=float(intensity),
+            )
+            self._clip_light_node = context.add_node(
+                self._clip_light,
+                name="clip_random_light",
+                pose=pose,
+            )
+            return
+        with self._scene.visualizer.viewer_lock:
+            self._clip_light.color = np.asarray((1.0, 1.0, 1.0), dtype=np.float32)
+            self._clip_light.intensity = float(intensity)
+            self._clip_light_node.matrix = pose
+
+    def _seed_for_clip(self, clip_id: str) -> int:
+        payload = f"{self._clip_light_config.seed}:{clip_id}".encode("utf-8", "ignore")
+        digest = hashlib.blake2b(payload, digest_size=8).digest()
+        return int.from_bytes(digest[:4], byteorder="little", signed=False)
 
     def _set_joint_positions(self, values: np.ndarray) -> None:
         vector = np.asarray(values, dtype=np.float32).reshape(-1)

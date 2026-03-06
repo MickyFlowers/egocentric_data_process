@@ -34,6 +34,7 @@ class IKConfig:
     collision_filter_neutral_touching_pairs: bool = True
     collision_neutral_touching_tolerance: float = 1.0e-9
     collision_ignore_links: tuple[str, ...] = ()
+    collision_force_include_link_pairs: tuple[tuple[str, str], ...] = ()
     use_collision: bool = False
     require_collision: bool = False
     use_joint_ekf_smoothing: bool = True
@@ -103,6 +104,9 @@ class PinocchioIKSolver:
 
         self.config = config or IKConfig()
         self.ignored_collision_links = {str(name) for name in self.config.collision_ignore_links if str(name)}
+        self.forced_collision_link_pairs = self._normalize_link_pair_set(
+            self.config.collision_force_include_link_pairs
+        )
         self.early_stop_position_tolerance = float(
             self.config.early_stop_position_tolerance
             if self.config.early_stop_position_tolerance is not None
@@ -808,6 +812,8 @@ class PinocchioIKSolver:
             mask &= ~self._adjacent_collision_pair_mask()
         if self.config.collision_filter_neutral_touching_pairs:
             mask &= ~self._neutral_touching_collision_pair_mask()
+        if self.forced_collision_link_pairs:
+            mask |= self._force_include_link_collision_pair_mask()
 
         self.collision_pair_count_total = total_pairs
         self.collision_pair_count_active = int(np.count_nonzero(mask))
@@ -856,6 +862,20 @@ class PinocchioIKSolver:
             first_link = self._geometry_link_name(first_object.name)
             second_link = self._geometry_link_name(second_object.name)
             if first_link in self.ignored_collision_links or second_link in self.ignored_collision_links:
+                mask[pair_index] = True
+        return mask
+
+    def _force_include_link_collision_pair_mask(self) -> np.ndarray:
+        if self.collision_model is None or not self.forced_collision_link_pairs:
+            return np.zeros((0,), dtype=np.bool_)
+
+        mask = np.zeros((len(self.collision_model.collisionPairs),), dtype=np.bool_)
+        for pair_index, pair in enumerate(self.collision_model.collisionPairs):
+            first_object = self.collision_model.geometryObjects[pair.first]
+            second_object = self.collision_model.geometryObjects[pair.second]
+            first_link = self._geometry_link_name(first_object.name)
+            second_link = self._geometry_link_name(second_object.name)
+            if frozenset((first_link, second_link)) in self.forced_collision_link_pairs:
                 mask[pair_index] = True
         return mask
 
@@ -947,6 +967,21 @@ class PinocchioIKSolver:
         if separator and suffix.isdigit():
             return prefix
         return base_name
+
+    @staticmethod
+    def _normalize_link_pair_set(values: Any) -> set[frozenset[str]]:
+        if not isinstance(values, (list, tuple)):
+            return set()
+        normalized: set[frozenset[str]] = set()
+        for item in values:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            first = str(item[0]).strip()
+            second = str(item[1]).strip()
+            if not first or not second or first == second:
+                continue
+            normalized.add(frozenset((first, second)))
+        return normalized
 
     def _clip_q_indices(
         self,

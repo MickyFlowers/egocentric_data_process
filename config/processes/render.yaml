@@ -4,6 +4,7 @@
   params:
     reachable_ratio_threshold: 0.9
     collision_ratio_threshold: 0.05
+    missing_reachable_ratio_default: 1.0
 
 - name: render
   type: render
@@ -18,6 +19,12 @@
     default_fov_deg: 55.0
     camera_near: 0.001
     camera_far: 10.0
+    randomize_clip_light: false
+    light_seed: 0
+    ambient_light: [0.08, 0.08, 0.08]
+    clip_light_xy_range: [0.16, 0.12]
+    clip_light_height_range: [0.20, 0.34]
+    clip_light_intensity_range: [18.0, 30.0]
     render_height: null
     render_width: null
     render_relative_dir: render

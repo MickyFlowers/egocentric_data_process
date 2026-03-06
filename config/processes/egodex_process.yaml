@@ -87,6 +87,12 @@
         filter_neutral_touching_pairs: true
         neutral_touching_tolerance: 1.0e-9
         ignore_links: [base_link, left_base_link, right_base_link, left_link1, right_link1, left_link6, right_link6, left_link7, left_link8, right_link7, right_link8]
+        force_include_link_pairs:
+          - [left_link6, right_link6]
+          - [left_link6, right_camera_stand]
+          - [left_link6, right_camera_link]
+          - [right_link6, left_camera_stand]
+          - [right_link6, left_camera_link]
     sides:
       left:
         base_frame: left_base_link
