@@ -13,5 +13,5 @@ python3 -m pip install --upgrade -r requirements.txt
 
 python3 scripts/patch_chumpy.py
 
-conda install -c conda-forge pinocchio hpp-fcl
+conda install -c conda-forge pinocchio hpp-fcl -y
 pip install genesis-world

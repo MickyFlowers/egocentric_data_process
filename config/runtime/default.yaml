@@ -5,7 +5,7 @@ resume: false
 recover_in_progress: true
 show_progress: true
 path_mapping:
-  local_mount: .
+  local_mount: /home/
   oss_prefix: oss://
 ray:
   address: null
