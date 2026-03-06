@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统计左右手 reachable ratio 都高于阈值的轨迹数量。"""
+"""统计满足 reachable ratio 和 collision ratio 阈值的轨迹数量。"""
 from __future__ import annotations
 
 import argparse
@@ -45,18 +45,18 @@ def _extract_sample_ids_from_meta(payload: Any) -> list[str]:
     return list(dict.fromkeys(sample_ids))
 
 
-def _extract_ratio_from_ik_section(meta_data: dict[str, Any], side: str) -> float | None:
+def _extract_bool_ratio_from_ik_section(meta_data: dict[str, Any], side: str, key: str) -> float | None:
     ik_section = meta_data.get("ik")
     if not isinstance(ik_section, dict):
         return None
     side_section = ik_section.get(side)
     if not isinstance(side_section, dict):
         return None
-    reachable = side_section.get("reachable")
-    if not isinstance(reachable, list) or len(reachable) == 0:
+    values = side_section.get(key)
+    if not isinstance(values, list) or len(values) == 0:
         return None
     valid_flags: list[float] = []
-    for item in reachable:
+    for item in values:
         value = _safe_float(item)
         if value is None:
             continue
@@ -74,9 +74,19 @@ def _extract_left_right_ratio(meta_data: dict[str, Any]) -> tuple[float | None, 
     if right is None:
         right = _safe_float(meta_data.get("right_reachable"))
     if left is None:
-        left = _extract_ratio_from_ik_section(meta_data, "left")
+        left = _extract_bool_ratio_from_ik_section(meta_data, "left", "reachable")
     if right is None:
-        right = _extract_ratio_from_ik_section(meta_data, "right")
+        right = _extract_bool_ratio_from_ik_section(meta_data, "right", "reachable")
+    return left, right
+
+
+def _extract_left_right_collision_ratio(meta_data: dict[str, Any]) -> tuple[float | None, float | None]:
+    left = _safe_float(meta_data.get("left_collision_ratio"))
+    right = _safe_float(meta_data.get("right_collision_ratio"))
+    if left is None:
+        left = _extract_bool_ratio_from_ik_section(meta_data, "left", "collision")
+    if right is None:
+        right = _extract_bool_ratio_from_ik_section(meta_data, "right", "collision")
     return left, right
 
 
@@ -93,7 +103,9 @@ def _load_meta_data_path_by_sample_id(input_dir: Path, sample_id: str, meta_data
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Count trajectories with left/right reachable ratio above threshold.")
+    parser = argparse.ArgumentParser(
+        description="Count trajectories with left/right reachable ratio above threshold and collision ratio below threshold."
+    )
     parser.add_argument(
         "--input-dir",
         type=Path,
@@ -105,6 +117,12 @@ def main() -> None:
         type=float,
         default=0.95,
         help="Threshold for both left/right reachable ratio.",
+    )
+    parser.add_argument(
+        "--collision-threshold",
+        type=float,
+        default=0.05,
+        help="Upper bound for both left/right collision ratio.",
     )
     parser.add_argument(
         "--meta-data-dir",
@@ -121,6 +139,7 @@ def main() -> None:
 
     input_dir = args.input_dir.expanduser().resolve()
     threshold = float(args.threshold)
+    collision_threshold = float(args.collision_threshold)
     meta_json_path = input_dir / "meta.json"
 
     meta_data_paths: list[Path] = []
@@ -146,6 +165,7 @@ def main() -> None:
     valid = 0
     passed = 0
     missing_ratio = 0
+    missing_collision_ratio = 0
     pass_ids: list[str] = []
 
     for path in meta_data_paths:
@@ -158,11 +178,20 @@ def main() -> None:
             sample_id = path.stem
 
         left_ratio, right_ratio = _extract_left_right_ratio(meta_data)
+        left_collision_ratio, right_collision_ratio = _extract_left_right_collision_ratio(meta_data)
         if left_ratio is None or right_ratio is None:
             missing_ratio += 1
             continue
+        if left_collision_ratio is None or right_collision_ratio is None:
+            missing_collision_ratio += 1
+            continue
         valid += 1
-        if left_ratio > threshold and right_ratio > threshold:
+        if (
+            left_ratio > threshold
+            and right_ratio > threshold
+            and left_collision_ratio < collision_threshold
+            and right_collision_ratio < collision_threshold
+        ):
             passed += 1
             pass_ids.append(sample_id)
 
@@ -171,10 +200,12 @@ def main() -> None:
 
     print(f"input_dir: {input_dir}")
     print(f"meta_source: {'meta.json' if used_meta_json else args.meta_data_dir}")
-    print(f"threshold: {threshold:.6f}")
+    print(f"reachable_threshold: {threshold:.6f}")
+    print(f"collision_threshold: {collision_threshold:.6f}")
     print(f"total_meta_files: {total}")
     print(f"valid_with_ratio: {valid}")
     print(f"missing_ratio: {missing_ratio}")
+    print(f"missing_collision_ratio: {missing_collision_ratio}")
     print(f"pass_count: {passed}")
     print(f"fail_count: {fail}")
     print(f"pass_rate: {pass_rate:.6f}")
