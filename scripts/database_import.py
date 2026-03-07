@@ -28,12 +28,16 @@ def main(args):
             render_sample_ids = json.load(f)
         
         for ik_sample_id in tqdm(ik_sample_ids):
-            sample_id_meta = json.load(open(os.path.join(part, "meta_data", ik_sample_id + ".json"), "r"))
+            data_path = os.path.join(part, "data", ik_sample_id + ".parquet").replace("/home/", "oss://")
+            meta_data_path = os.path.join(part, "meta_data", ik_sample_id + ".json")
+            video_path = os.path.join(part, "render", ik_sample_id + ".mp4").replace("/home/", "oss://")
+            sample_id_meta = json.load(open(meta_data_path, "r"))
+            
             path = sample_id_meta['video_path']
             if ik_sample_id not in render_sample_ids:
-                result = {"has_ik_result": True, "rendered": False}
+                result = {"agilex_ik_result_data_path": data_path, "agilex_ik_result_meta_data_path": meta_data_path.replace("/home/", "oss://")}
             else:
-                result = {"has_ik_result": True, "rendered": True}
+                result = {"agilex_ik_result_data_path": data_path, "agilex_ik_result_meta_data_path": meta_data_path.replace("/home/", "oss://"), "agilex_rendered_video_path": video_path.replace("/home/", "oss://")}
             # print(result)
             try:
                 # pass
