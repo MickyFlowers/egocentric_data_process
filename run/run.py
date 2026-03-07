@@ -497,12 +497,14 @@ class PipelineWorker:
             self.manifest.mark_completed(sample_id, summary=summary)
             context.finish()
             return {"sample_id": sample_id, "status": "completed"}
-        except Exception as exc:
+        except BaseException as exc:
             error_text = traceback.format_exc()
             print(f"Processing failed for sample {sample_id}:\n{error_text}")
             context.cleanup()
             self.manifest.reset_to_pending(sample_id, last_error=error_text)
-            return {"sample_id": sample_id, "status": "failed", "error": str(exc)}
+            if isinstance(exc, Exception):
+                return {"sample_id": sample_id, "status": "failed", "error": str(exc)}
+            raise
 
 
 if hydra is not None:

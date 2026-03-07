@@ -152,7 +152,7 @@ python -m pip install supabase
 ### 4.1 运行通用处理链
 
 ```bash
-python -m run.run --config-name pipeline
+python -m run.run   data=database_loader   runtime.num_workers=256 data.params.dataset_name=Ego10k   processes.0.params.output_dir.remote=oss://ss-oss1/data/dataset/egocentric/Egocentric-10K/processed data.params.num_parts=8 data.params.part=5 runtime.resume=true
 ```
 
 常用覆盖参数：
