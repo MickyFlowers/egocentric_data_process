@@ -5,7 +5,7 @@ export EGL_DEVICE_ID=0
 
 set -euo pipefail
 
-
+rm -rf ../manopth
 cd ../
 git clone https://gh-proxy.org/https://github.com/hassony2/manopth.git
 cd manopth

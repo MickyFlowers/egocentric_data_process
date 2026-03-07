@@ -37,15 +37,15 @@
 
 ### 2.1 通用 Pipeline
 
-入口配置：[`config/pipeline.yaml`](/Users/cyxovo/ego_data_process/config/pipeline.yaml)
+入口配置：`[config/pipeline.yaml](/Users/cyxovo/ego_data_process/config/pipeline.yaml)`
 
 默认 data loader：
 
-- [`config/data/database_loader.yaml`](/Users/cyxovo/ego_data_process/config/data/database_loader.yaml)
+- `[config/data/database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/database_loader.yaml)`
 
 默认 process 链：
 
-- [`config/processes/process.yaml`](/Users/cyxovo/ego_data_process/config/processes/process.yaml)
+- `[config/processes/process.yaml](/Users/cyxovo/ego_data_process/config/processes/process.yaml)`
 
 输出：
 
@@ -56,19 +56,19 @@
 
 ### 2.2 EgoDex Pipeline
 
-入口配置：[`config/egodex_pipeline.yaml`](/Users/cyxovo/ego_data_process/config/egodex_pipeline.yaml)
+入口配置：`[config/egodex_pipeline.yaml](/Users/cyxovo/ego_data_process/config/egodex_pipeline.yaml)`
 
 默认 data loader：
 
-- [`config/data/egodex_database_loader.yaml`](/Users/cyxovo/ego_data_process/config/data/egodex_database_loader.yaml)
+- `[config/data/egodex_database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/egodex_database_loader.yaml)`
 
 本地目录版 data loader：
 
-- [`config/data/egodex_glob_loader.yaml`](/Users/cyxovo/ego_data_process/config/data/egodex_glob_loader.yaml)
+- `[config/data/egodex_glob_loader.yaml](/Users/cyxovo/ego_data_process/config/data/egodex_glob_loader.yaml)`
 
 默认 process 链：
 
-- [`config/processes/egodex_process.yaml`](/Users/cyxovo/ego_data_process/config/processes/egodex_process.yaml)
+- `[config/processes/egodex_process.yaml](/Users/cyxovo/ego_data_process/config/processes/egodex_process.yaml)`
 
 说明：
 
@@ -77,15 +77,15 @@
 
 ### 2.3 Render Pipeline
 
-入口配置：[`config/pipeline_render.yaml`](/Users/cyxovo/ego_data_process/config/pipeline_render.yaml)
+入口配置：`[config/pipeline_render.yaml](/Users/cyxovo/ego_data_process/config/pipeline_render.yaml)`
 
 默认 data loader：
 
-- [`config/data/processed_loader.yaml`](/Users/cyxovo/ego_data_process/config/data/processed_loader.yaml)
+- `[config/data/processed_loader.yaml](/Users/cyxovo/ego_data_process/config/data/processed_loader.yaml)`
 
 默认 process 链：
 
-- [`config/processes/render.yaml`](/Users/cyxovo/ego_data_process/config/processes/render.yaml)
+- `[config/processes/render.yaml](/Users/cyxovo/ego_data_process/config/processes/render.yaml)`
 
 输出：
 
@@ -187,7 +187,10 @@ python -m run.run --config-name egodex_pipeline runtime.limit=20 runtime.num_wor
 渲染默认读取 `outputs/` 下已经生成的 processed 数据：
 
 ```bash
-python -m run.run --config-name pipeline_render
+export PYGLET_HEADLESS=1
+export PYOPENGL_PLATFORM=egl
+export EGL_DEVICE_ID=0
+python -m run.run --config-name pipeline_render runtime.num_workers=128 processes.1.params.genesis_backend=gpu
 ```
 
 如果 processed 数据不在默认目录：
@@ -231,13 +234,13 @@ python -m run.run --config-name pipeline_render data.params.num_parts=4 data.par
 
 常用配置入口：
 
-- 通用 pipeline: [`config/pipeline.yaml`](/Users/cyxovo/ego_data_process/config/pipeline.yaml)
-- EgoDex pipeline: [`config/egodex_pipeline.yaml`](/Users/cyxovo/ego_data_process/config/egodex_pipeline.yaml)
-- Render pipeline: [`config/pipeline_render.yaml`](/Users/cyxovo/ego_data_process/config/pipeline_render.yaml)
-- 通用 process: [`config/processes/process.yaml`](/Users/cyxovo/ego_data_process/config/processes/process.yaml)
-- EgoDex process: [`config/processes/egodex_process.yaml`](/Users/cyxovo/ego_data_process/config/processes/egodex_process.yaml)
-- Render process: [`config/processes/render.yaml`](/Users/cyxovo/ego_data_process/config/processes/render.yaml)
-- Runtime: [`config/runtime/default.yaml`](/Users/cyxovo/ego_data_process/config/runtime/default.yaml)
+- 通用 pipeline: `[config/pipeline.yaml](/Users/cyxovo/ego_data_process/config/pipeline.yaml)`
+- EgoDex pipeline: `[config/egodex_pipeline.yaml](/Users/cyxovo/ego_data_process/config/egodex_pipeline.yaml)`
+- Render pipeline: `[config/pipeline_render.yaml](/Users/cyxovo/ego_data_process/config/pipeline_render.yaml)`
+- 通用 process: `[config/processes/process.yaml](/Users/cyxovo/ego_data_process/config/processes/process.yaml)`
+- EgoDex process: `[config/processes/egodex_process.yaml](/Users/cyxovo/ego_data_process/config/processes/egodex_process.yaml)`
+- Render process: `[config/processes/render.yaml](/Users/cyxovo/ego_data_process/config/processes/render.yaml)`
+- Runtime: `[config/runtime/default.yaml](/Users/cyxovo/ego_data_process/config/runtime/default.yaml)`
 
 常用 Hydra override：
 
@@ -254,3 +257,4 @@ python -m run.run --config-name pipeline_render data.params.part=0 data.params.n
 - `pipeline_render` 依赖 processed 输出，不能直接对原始手部数据渲染。
 - 当前 EgoDex pipeline 默认走 database loader；如果本地调试请显式使用 `data=egodex_glob_loader`。
 - `requirements.txt` 里没有把所有可选依赖都列全，尤其是 `h5py`、`genesis-world`、`pinocchio`、`hpp-fcl`、`manopth`、`chumpy`。
+
