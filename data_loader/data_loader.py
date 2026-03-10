@@ -446,7 +446,7 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
         multi_hand_value = self.params.get("multi_hand_value", "False")
         data_extension = str(self.params.get("data_extension", ".pose3d_hand"))
         visualize_ratio = self._require_visualize_ratio()
-        sample_id_tail_parts = self._resolve_sample_id_tail_parts(default=1)
+        sample_id_tail_parts = self._resolve_sample_id_tail_parts(default=None)
         random_number_field = str(self.params.get("random_number_field", "random_number"))
         random_threshold = float(self.params.get("random_threshold", 0.01))
         query_limit_raw = self.params.get("query_limit", 100)
@@ -474,7 +474,7 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
         response = query.execute()
         rows = list(response.data)
         print(f"Fetched {len(rows)} random sample(s) from database")
-        return self._build_database_samples(
+        samples = self._build_database_samples(
             rows,
             path_field=path_field,
             data_path_field=data_path_field,
@@ -482,6 +482,36 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
             sample_id_tail_parts=sample_id_tail_parts,
             visualize_ratio=visualize_ratio,
         )
+        return self._ensure_unique_sample_ids(samples, visualize_ratio=visualize_ratio)
+
+    def _ensure_unique_sample_ids(
+        self,
+        samples: list[dict[str, Any]],
+        *,
+        visualize_ratio: float,
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for sample in samples:
+            sample_id = sample.get("sample_id")
+            if not isinstance(sample_id, str) or not sample_id:
+                raise KeyError("random_database_loader requires non-empty string sample_id for every sample")
+            grouped.setdefault(sample_id, []).append(sample)
+
+        collision_count = 0
+        for sample_id, group in grouped.items():
+            if len(group) <= 1:
+                continue
+            collision_count += len(group)
+            for sample in group:
+                video_path = str(sample.get("video_path", ""))
+                digest = hashlib.blake2b(video_path.encode("utf-8", "ignore"), digest_size=4).hexdigest()
+                unique_id = f"{sample_id}_{digest}"
+                sample["sample_id"] = unique_id
+                sample["visualize"] = self._should_visualize(unique_id, visualize_ratio)
+
+        if collision_count > 0:
+            print(f"[data_loader] resolved {collision_count} colliding sample_id(s) in random_database_loader")
+        return samples
 
 
 @register_data_loader("processed")
