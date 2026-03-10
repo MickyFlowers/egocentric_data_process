@@ -113,12 +113,21 @@ def _compute_test_geometry_frame(joints: np.ndarray, side: str) -> dict[str, Any
         axis=0,
     ).astype(np.float32, copy=False)
 
-    thumb_x_projected = thumb_projected[-1]
-    index_x_projected = index_projected[-1]
+    paired_count = min(3, thumb_projected.shape[0], index_projected.shape[0])
+    if paired_count <= 0:
+        return None
+    selected_thumb_projected = thumb_projected[:paired_count]
+    selected_index_projected = index_projected[:paired_count]
+    pair_midpoints = 0.5 * (selected_thumb_projected + selected_index_projected)
     if side == "left":
-        x_axis = _normalize_vector(index_x_projected - thumb_x_projected)
+        pair_vectors = selected_index_projected - selected_thumb_projected
     else:
-        x_axis = _normalize_vector(thumb_x_projected - index_x_projected)
+        pair_vectors = selected_thumb_projected - selected_index_projected
+    pair_norms = np.linalg.norm(pair_vectors, axis=1)
+    finite_pair_mask = np.isfinite(pair_vectors).all(axis=1) & np.isfinite(pair_midpoints).all(axis=1) & np.isfinite(pair_norms)
+    if int(np.count_nonzero(finite_pair_mask)) <= 0:
+        return None
+    x_axis = _normalize_vector(pair_vectors[finite_pair_mask].mean(axis=0))
     if np.linalg.norm(x_axis) < 1.0e-8:
         return None
 
@@ -132,7 +141,7 @@ def _compute_test_geometry_frame(joints: np.ndarray, side: str) -> dict[str, Any
     )
     plane_points = np.concatenate([thumb_projected, index_projected], axis=0)
     plane_weights = np.concatenate([thumb_weights, index_weights], axis=0)
-    plane_anchor = 0.5 * (thumb_x_projected + index_x_projected)
+    plane_anchor = pair_midpoints[finite_pair_mask].mean(axis=0)
     y_axis = _fit_plane_normal_through_axis(
         plane_points,
         plane_weights,
