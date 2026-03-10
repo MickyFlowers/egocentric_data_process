@@ -1,0 +1,18 @@
+type: random_database_loader
+params:
+  database_url: "http://192.168.3.208:54321"
+  database_key: "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+  database_table: "egocentric_dataset_clips"
+  path_field: path
+  data_extension: .pose3d_hand
+  required_data_field: pose3d_hand_path
+  apply_multi_hand_filter: true
+  multi_hand_field: multi_hand_flag
+  multi_hand_value: "False"
+  random_number_field: random_number
+  random_threshold: 0.01
+  query_limit: 3000
+  # part is 0-based: valid range is [0, num_parts)
+  num_parts: 1
+  part: 0
+  visualize_ratio: 0.001

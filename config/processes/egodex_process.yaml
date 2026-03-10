@@ -25,6 +25,7 @@
   enabled: true
   params:
     output_dir: *shared_output_dir
+    retarget_scheme: legacy
     axis_length: 0.03
     workspace_center: [0.25, 0.0, 0.1]
     camera_elevation_deg: 45.0
@@ -121,6 +122,7 @@
     hand: {}
     eef:
       axis_length: 0.03
+      smooth_poses: true
       left_base_translation: [0.0, 0.3, 0.0]
       right_base_translation: [0.0, -0.3, 0.0]
     ik:

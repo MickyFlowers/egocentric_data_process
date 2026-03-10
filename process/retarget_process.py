@@ -12,7 +12,7 @@ from utils.retarget_utils import (
     align_poses_to_workstation,
     build_pose_matrices,
     build_transform_matrix,
-    compute_eef_poses_pinch_plane,
+    compute_eef_poses,
     express_poses_in_frame,
     get_default_camera_matrix,
     pose_matrices_to_vectors,
@@ -25,15 +25,18 @@ from .core import BaseProcess, register_process
 @register_process("retarget")
 class RetargetProcess(BaseProcess):
     def run(self, sample: dict[str, Any], context: Any) -> dict[str, Any]:
-        left_camera_poses = compute_eef_poses_pinch_plane(
+        retarget_scheme = str(self.params.get("retarget_scheme", "legacy")).strip().lower() or "legacy"
+        left_camera_poses = compute_eef_poses(
             sample["left_hand"]["keypoints"],
             sample["left_hand"]["valid"],
             side="left",
+            scheme=retarget_scheme,
         )
-        right_camera_poses = compute_eef_poses_pinch_plane(
+        right_camera_poses = compute_eef_poses(
             sample["right_hand"]["keypoints"],
             sample["right_hand"]["valid"],
             side="right",
+            scheme=retarget_scheme,
         )
         fps = float(sample["fps"])
 
@@ -116,6 +119,7 @@ class RetargetProcess(BaseProcess):
                 "left": "left_base_link",
                 "right": "right_base_link",
             },
+            "retarget_scheme": retarget_scheme,
             "poses": {
                 "left": left_base_poses[:, :6].tolist(),
                 "right": right_base_poses[:, :6].tolist(),

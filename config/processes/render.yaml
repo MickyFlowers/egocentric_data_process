@@ -2,7 +2,7 @@
   type: render_filter
   enabled: true
   params:
-    reachable_ratio_threshold: 0.9
+    reachable_ratio_threshold: 0.0
     collision_ratio_threshold: 0.05
     missing_reachable_ratio_default: 1.0
 

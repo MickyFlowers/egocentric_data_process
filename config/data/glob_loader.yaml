@@ -3,6 +3,7 @@ params:
   dataset_name: "test_dataset"
   input_dir: ./examples
   input_glob: "**/*"
+  visualize_ratio: 1.0
   extensions:
     - .mp4
     - .mov

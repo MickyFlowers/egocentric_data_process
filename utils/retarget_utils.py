@@ -741,6 +741,131 @@ def _compute_palm_normal(joints, indices):
     return normal
 
 
+def _compute_cross_accumulated_y_axis(joints, wrist, thumb_idx, index_idx, side, *, normalize_inputs):
+    near_count = min(2, len(thumb_idx), len(index_idx))
+    y_sum = np.zeros(3, dtype=np.float32)
+    for offset in range(near_count):
+        thumb_vector = joints[thumb_idx[offset]] - wrist
+        index_vector = joints[index_idx[offset]] - wrist
+        if normalize_inputs:
+            thumb_vector = _normalize_vector(thumb_vector)
+            index_vector = _normalize_vector(index_vector)
+        if side == "left":
+            y_sum += np.cross(thumb_vector, index_vector)
+        else:
+            y_sum += np.cross(index_vector, thumb_vector)
+    return _normalize_vector(y_sum)
+
+
+def _project_vector(vector, axis):
+    base = np.asarray(vector, dtype=np.float32).reshape(3)
+    direction = _normalize_vector(axis)
+    if np.linalg.norm(direction) < 1e-8:
+        return np.zeros((3,), dtype=np.float32)
+    return (np.dot(base, direction) * direction).astype(np.float32, copy=False)
+
+
+def _reject_vector(vector, axis):
+    base = np.asarray(vector, dtype=np.float32).reshape(3)
+    return (base - _project_vector(base, axis)).astype(np.float32, copy=False)
+
+
+def _fit_line_to_points(points, *, anchor=None):
+    samples = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    if samples.shape[0] <= 0:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    if anchor is None:
+        center = samples.mean(axis=0)
+    else:
+        center = np.asarray(anchor, dtype=np.float32).reshape(3)
+    centered = samples - center.reshape(1, 3)
+    covariance = centered.T @ centered
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return center.astype(np.float32, copy=False), np.zeros((3,), dtype=np.float32)
+
+    direction = eigenvectors[:, int(np.argmax(eigenvalues))]
+    return center.astype(np.float32, copy=False), _normalize_vector(direction.astype(np.float32, copy=False))
+
+
+def _project_point_onto_line(point, line_point, line_direction):
+    target = np.asarray(point, dtype=np.float32).reshape(3)
+    anchor = np.asarray(line_point, dtype=np.float32).reshape(3)
+    direction = _normalize_vector(line_direction)
+    if np.linalg.norm(direction) < 1e-8:
+        return target.astype(np.float32, copy=False)
+    return (anchor + np.dot(target - anchor, direction) * direction).astype(np.float32, copy=False)
+
+
+def _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side):
+    wrist = joints[indices["wrist"]]
+    thumb_points = joints[thumb_idx]
+    index_points = joints[index_idx]
+    thumb_center = thumb_points.mean(axis=0)
+    index_center = index_points.mean(axis=0)
+    origin = 0.5 * (joints[indices["index_tip"]] + joints[indices["middle_tip"]])
+
+    y_axis = _compute_cross_accumulated_y_axis(
+        joints,
+        wrist,
+        thumb_idx,
+        index_idx,
+        side,
+        normalize_inputs=True,
+    )
+
+    if side == "right":
+        x_raw = thumb_center - index_center
+    else:
+        x_raw = index_center - thumb_center
+    x_raw = x_raw - np.dot(x_raw, y_axis) * y_axis
+    x_axis = _normalize_vector(x_raw)
+    if np.linalg.norm(x_axis) < 1e-8:
+        x_axis = _normalize_vector(joints[indices["thumb_tip"]] - joints[indices["index_tip"]])
+        x_axis = x_axis - np.dot(x_axis, y_axis) * y_axis
+        x_axis = _normalize_vector(x_axis)
+
+    z_axis = _normalize_vector(np.cross(x_axis, y_axis))
+    if np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
+        palm_normal = _compute_palm_normal(joints, indices)
+        x_axis = _normalize_vector(joints[indices["index_mcp"]] - wrist)
+        y_axis = _normalize_vector(np.cross(palm_normal, x_axis))
+        z_axis = _normalize_vector(np.cross(x_axis, y_axis))
+        if np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
+            return None
+
+    return origin, x_axis, y_axis, z_axis
+
+
+def compute_eef_poses_legacy(joints_cam, valid, side):
+    points = ensure_float32(joints_cam)
+    valid_mask = ensure_bool(valid).reshape(-1)
+    indices = _joint_indices(points.shape[1])
+    thumb_idx, index_idx = _thumb_index_indices(points.shape[1])
+    pinch = compute_pinch_norm(points, valid_mask)
+
+    poses = np.full((points.shape[0], 7), np.nan, dtype=np.float32)
+    for frame_index in range(points.shape[0]):
+        if not valid_mask[frame_index]:
+            continue
+
+        joints = points[frame_index]
+        pose_frame = _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side)
+        if pose_frame is None:
+            continue
+        origin, x_axis, y_axis, z_axis = pose_frame
+
+        rotation = np.stack([x_axis, y_axis, z_axis], axis=1).astype(np.float32, copy=False)
+        axis_angle = rotation_matrix_to_axis_angle(rotation)
+        poses[frame_index, :3] = origin
+        poses[frame_index, 3:6] = axis_angle
+        poses[frame_index, 6] = pinch[frame_index]
+
+    return poses
+
+
 def compute_eef_poses_pinch_plane(joints_cam, valid, side):
     points = ensure_float32(joints_cam)
     valid_mask = ensure_bool(valid).reshape(-1)
@@ -755,42 +880,35 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
 
         joints = points[frame_index]
         wrist = joints[indices["wrist"]]
-        thumb_points = joints[thumb_idx]
-        index_points = joints[index_idx]
-        thumb_center = thumb_points.mean(axis=0)
-        index_center = index_points.mean(axis=0)
-        origin = 0.5 * (thumb_center + index_center)
+        thumb_tip = joints[indices["thumb_tip"]]
+        index_tip = joints[indices["index_tip"]]
+        origin = (0.5 * (thumb_tip + index_tip)).astype(np.float32, copy=False)
 
-        near_count = min(2, len(thumb_idx), len(index_idx))
-        y_sum = np.zeros(3, dtype=np.float32)
-        for offset in range(near_count):
-            thumb_vector = joints[thumb_idx[offset]] - wrist
-            index_vector = joints[index_idx[offset]] - wrist
-            if side == "left":
-                y_sum += np.cross(thumb_vector, index_vector)
-            else:
-                y_sum += np.cross(index_vector, thumb_vector)
-        y_axis = _normalize_vector(y_sum)
-
-        if side == "right":
-            x_raw = thumb_center - index_center
+        thumb_line_point, thumb_line_direction = _fit_line_to_points(joints[thumb_idx], anchor=wrist)
+        index_line_point, index_line_direction = _fit_line_to_points(joints[index_idx], anchor=wrist)
+        projected_thumb_tip = _project_point_onto_line(thumb_tip, thumb_line_point, thumb_line_direction)
+        projected_index_tip = _project_point_onto_line(index_tip, index_line_point, index_line_direction)
+        y_axis = _compute_cross_accumulated_y_axis(
+            joints,
+            wrist,
+            thumb_idx,
+            index_idx,
+            side,
+            normalize_inputs=True,
+        )
+        if side == "left":
+            x_raw = projected_index_tip - projected_thumb_tip
         else:
-            x_raw = index_center - thumb_center
-        x_raw = x_raw - np.dot(x_raw, y_axis) * y_axis
+            x_raw = projected_thumb_tip - projected_index_tip
+        x_raw = _reject_vector(x_raw, y_axis)
         x_axis = _normalize_vector(x_raw)
-        if np.linalg.norm(x_axis) < 1e-8:
-            x_axis = _normalize_vector(joints[indices["thumb_tip"]] - joints[indices["index_tip"]])
-            x_axis = x_axis - np.dot(x_axis, y_axis) * y_axis
-            x_axis = _normalize_vector(x_axis)
-
         z_axis = _normalize_vector(np.cross(x_axis, y_axis))
-        if np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
-            palm_normal = _compute_palm_normal(joints, indices)
-            x_axis = _normalize_vector(joints[indices["index_mcp"]] - wrist)
-            y_axis = _normalize_vector(np.cross(palm_normal, x_axis))
-            z_axis = _normalize_vector(np.cross(x_axis, y_axis))
-            if np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
+
+        if np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
+            pose_frame = _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side)
+            if pose_frame is None:
                 continue
+            _, x_axis, y_axis, z_axis = pose_frame
 
         rotation = np.stack([x_axis, y_axis, z_axis], axis=1).astype(np.float32, copy=False)
         axis_angle = rotation_matrix_to_axis_angle(rotation)
@@ -799,3 +917,12 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
         poses[frame_index, 6] = pinch[frame_index]
 
     return poses
+
+
+def compute_eef_poses(joints_cam, valid, side, scheme="legacy"):
+    scheme_name = str(scheme or "legacy").strip().lower()
+    if scheme_name == "legacy":
+        return compute_eef_poses_legacy(joints_cam, valid, side)
+    if scheme_name == "pinch_plane":
+        return compute_eef_poses_pinch_plane(joints_cam, valid, side)
+    raise ValueError(f"unsupported retarget scheme: {scheme}")

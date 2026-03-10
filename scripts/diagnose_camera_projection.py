@@ -34,7 +34,7 @@ from utils.retarget_utils import (
     axis_angle_to_rotation_matrix,
     build_pose_matrices,
     build_transform_matrix,
-    compute_eef_poses_pinch_plane,
+    compute_eef_poses,
     ensure_bool,
     express_poses_in_frame,
     get_default_camera_matrix,
@@ -212,8 +212,9 @@ def _recompute_retarget(
         fix_shapedirs=fix_shapedirs,
     )
 
-    left_camera_pose = compute_eef_poses_pinch_plane(left_keypoints, left_valid, side="left")
-    right_camera_pose = compute_eef_poses_pinch_plane(right_keypoints, right_valid, side="right")
+    retarget_scheme = str(retarget_params.get("retarget_scheme", "legacy")).strip().lower() or "legacy"
+    left_camera_pose = compute_eef_poses(left_keypoints, left_valid, side="left", scheme=retarget_scheme)
+    right_camera_pose = compute_eef_poses(right_keypoints, right_valid, side="right", scheme=retarget_scheme)
 
     camera_matrix = get_default_camera_matrix(
         camera_elevation_deg=float(retarget_params.get("camera_elevation_deg", 45.0))
@@ -280,6 +281,7 @@ def _recompute_retarget(
         "intrinsics": np.asarray(intrinsics, dtype=np.float64).reshape(3, 3),
         "image_size_hw": (int(image_h), int(image_w)),
         "camera_extrinsics": np.asarray(camera_matrix, dtype=np.float64).reshape(4, 4),
+        "retarget_scheme": retarget_scheme,
         "left_base_pose": np.asarray(left_base_pose, dtype=np.float64),
         "right_base_pose": np.asarray(right_base_pose, dtype=np.float64),
         "left_world_pose": np.asarray(left_world, dtype=np.float64),

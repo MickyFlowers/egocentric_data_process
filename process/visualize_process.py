@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from utils.retarget_utils import (
+    compute_eef_poses,
     build_pose_matrices,
     build_transform_matrix,
     pose_matrices_to_vectors,
@@ -74,7 +75,7 @@ class VisualizeProcess(BaseProcess):
         if "image_size" not in sample and eef_payload.get("image_size") is not None:
             sample["image_size"] = np.asarray(eef_payload["image_size"], dtype=np.int32)
 
-        left_poses, right_poses = self._build_camera_pose_vectors(eef_payload)
+        left_poses, right_poses = self._build_camera_pose_vectors(sample, eef_payload)
         self._eef_visualizer._write_visualization(
             sample,
             context,
@@ -124,7 +125,16 @@ class VisualizeProcess(BaseProcess):
         sample["ik"] = payload
         return payload
 
-    def _build_camera_pose_vectors(self, eef_payload: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    def _build_camera_pose_vectors(
+        self,
+        sample: dict[str, Any],
+        eef_payload: dict[str, Any],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not bool(self._eef_visualizer.params.get("smooth_poses", True)):
+            raw_pose_vectors = self._build_raw_camera_pose_vectors(sample, eef_payload)
+            if raw_pose_vectors is not None:
+                return raw_pose_vectors
+
         pose_map = eef_payload.get("poses")
         if not isinstance(pose_map, dict):
             raise ValueError("invalid eef payload: missing 'poses'")
@@ -145,6 +155,46 @@ class VisualizeProcess(BaseProcess):
         left_camera = self._convert_base_to_camera(left_base, left_transform, camera_inverse)
         right_camera = self._convert_base_to_camera(right_base, right_transform, camera_inverse)
         return left_camera, right_camera
+
+    def _build_raw_camera_pose_vectors(
+        self,
+        sample: dict[str, Any],
+        eef_payload: dict[str, Any],
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        left_hand = sample.get("left_hand")
+        right_hand = sample.get("right_hand")
+        if not isinstance(left_hand, dict) or not isinstance(right_hand, dict):
+            return None
+
+        left_keypoints = left_hand.get("keypoints")
+        left_valid = left_hand.get("valid")
+        right_keypoints = right_hand.get("keypoints")
+        right_valid = right_hand.get("valid")
+        if left_keypoints is None or left_valid is None or right_keypoints is None or right_valid is None:
+            return None
+
+        retarget_scheme = str(
+            eef_payload.get(
+                "retarget_scheme",
+                self._eef_visualizer.params.get("retarget_scheme", "legacy"),
+            )
+        ).strip().lower() or "legacy"
+        left_camera = compute_eef_poses(
+            left_keypoints,
+            left_valid,
+            side="left",
+            scheme=retarget_scheme,
+        )
+        right_camera = compute_eef_poses(
+            right_keypoints,
+            right_valid,
+            side="right",
+            scheme=retarget_scheme,
+        )
+        return (
+            np.asarray(left_camera[:, :6], dtype=np.float32),
+            np.asarray(right_camera[:, :6], dtype=np.float32),
+        )
 
     @staticmethod
     def _convert_base_to_camera(
@@ -201,6 +251,7 @@ class VisualizeProcess(BaseProcess):
         if common_output_dir is not None:
             params.setdefault("output_dir", common_output_dir)
         params.setdefault("axis_length", float(self.params.get("axis_length", 0.03)))
+        params.setdefault("smooth_poses", True)
         if "left_base_translation" in self.params:
             params.setdefault("left_base_translation", self.params["left_base_translation"])
         if "right_base_translation" in self.params:

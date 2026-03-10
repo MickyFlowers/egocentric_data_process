@@ -288,14 +288,9 @@ class EgoDexDataLoader(BaseDataLoader):
 @register_data_loader("database_loader")
 class DatabaseDataLoader(BaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
-        if create_client is None:
-            raise ModuleNotFoundError(
-                "supabase is required for database_loader. Install it with `python -m pip install supabase`."
-            )
-        database_url = self.params.get("database_url")
-        database_key = self.params.get("database_key")
+        database = self._create_database_client()
         dataset_name = self.params.get("dataset_name")
-        table_name = self.params.get("database_table")
+        table_name = self._require_non_empty_param("database_table")
         path_field = str(self.params.get("path_field", "path"))
         data_path_field = self.params.get("data_path_field")
         required_data_field = self.params.get("required_data_field", "pose3d_hand_path")
@@ -303,57 +298,128 @@ class DatabaseDataLoader(BaseDataLoader):
         multi_hand_field = self.params.get("multi_hand_field", "multi_hand_flag")
         multi_hand_value = self.params.get("multi_hand_value", "False")
         order_field = str(self.params.get("order_field", path_field))
-        page_size = int(self.params.get("page_size", 1000))
+        page_size = self._require_positive_int_param("page_size", default=1000)
         data_extension = str(self.params.get("data_extension", ".pose3d_hand"))
-        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        visualize_ratio = self._require_visualize_ratio()
         sample_id_tail_parts = self._resolve_sample_id_tail_parts(
             default=1,
             dataset_name=str(dataset_name) if dataset_name is not None else None,
         )
-        if not 0.0 <= visualize_ratio <= 1.0:
-            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
-        if page_size <= 0:
-            raise ValueError("data.params.page_size must be a positive integer")
-        database: Client = create_client(database_url, database_key)
+        select_fields = self._build_database_select_fields(path_field=path_field, data_path_field=data_path_field)
+
         start = 0
         samples: list[dict[str, Any]] = []
+        while True:
+            query = database.table(table_name).select(",".join(select_fields))
+            query = self._apply_database_common_filters(
+                query,
+                dataset_name=dataset_name,
+                required_data_field=required_data_field,
+                apply_multi_hand_filter=apply_multi_hand_filter,
+                multi_hand_field=multi_hand_field,
+                multi_hand_value=multi_hand_value,
+            )
+            response = query.order(order_field).range(start, start + page_size - 1).execute()
+            rows = list(response.data)
+            if len(rows) == 0:
+                break
+            start += len(rows)
+            print(f"Fetched {start} samples from database")
+            samples.extend(
+                self._build_database_samples(
+                    rows,
+                    path_field=path_field,
+                    data_path_field=data_path_field,
+                    data_extension=data_extension,
+                    sample_id_tail_parts=sample_id_tail_parts,
+                    visualize_ratio=visualize_ratio,
+                )
+            )
+        return samples
+
+    def _create_database_client(self) -> Client:
+        if create_client is None:
+            raise ModuleNotFoundError(
+                "supabase is required for database_loader. Install it with `python -m pip install supabase`."
+            )
+        database_url = self._require_non_empty_param("database_url")
+        database_key = self._require_non_empty_param("database_key")
+        return create_client(database_url, database_key)
+
+    def _require_non_empty_param(self, name: str) -> str:
+        value = self.params.get(name)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"data.params.{name} is required and must be a non-empty string")
+        return value
+
+    def _require_positive_int_param(self, name: str, *, default: int) -> int:
+        raw_value = self.params.get(name, default)
+        value = int(raw_value)
+        if value <= 0:
+            raise ValueError(f"data.params.{name} must be a positive integer")
+        return value
+
+    def _require_visualize_ratio(self) -> float:
+        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        if not 0.0 <= visualize_ratio <= 1.0:
+            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
+        return visualize_ratio
+
+    @staticmethod
+    def _build_database_select_fields(*, path_field: str, data_path_field: Any) -> list[str]:
         select_fields = [path_field]
         if isinstance(data_path_field, str) and data_path_field and data_path_field not in select_fields:
             select_fields.append(data_path_field)
-        while True:
-            query = database.table(table_name).select(",".join(select_fields))
-            if dataset_name is not None:
-                query = query.eq("dataset_name", dataset_name)
-            if isinstance(required_data_field, str) and required_data_field:
-                query = query.not_.is_(required_data_field, "null")
-            if apply_multi_hand_filter and isinstance(multi_hand_field, str) and multi_hand_field:
-                query = query.is_(multi_hand_field, str(multi_hand_value))
-            response = query.order(order_field).range(start, start + page_size - 1).execute()
-            if len(response.data) == 0:
-                break
-            start += len(response.data)
-            print("Fetched {} samples from database".format(start))
-            sample = []
-            for row in response.data:
-                video_path_value = row.get(path_field)
-                if not isinstance(video_path_value, str) or not video_path_value:
-                    continue
-                if isinstance(data_path_field, str) and data_path_field:
-                    data_path_value = row.get(data_path_field)
-                else:
-                    data_path_value = None
-                if not isinstance(data_path_value, str) or not data_path_value:
-                    data_path_value = video_path_value.replace(".mp4", data_extension)
-                sample_id = self._build_sample_id(video_path_value, tail_parts=sample_id_tail_parts)
-                sample.append(
-                    {
-                        "video_path": ensure_oss_path(video_path_value, config_root=self._config_root),
-                        "data_path": ensure_oss_path(data_path_value, config_root=self._config_root),
-                        "sample_id": sample_id,
-                        "visualize": self._should_visualize(sample_id, visualize_ratio),
-                    }
-                )
-            samples.extend(sample)
+        return select_fields
+
+    @staticmethod
+    def _apply_database_common_filters(
+        query: Any,
+        *,
+        dataset_name: Any,
+        required_data_field: Any,
+        apply_multi_hand_filter: bool,
+        multi_hand_field: Any,
+        multi_hand_value: Any,
+    ) -> Any:
+        if dataset_name is not None:
+            query = query.eq("dataset_name", dataset_name)
+        if isinstance(required_data_field, str) and required_data_field:
+            query = query.not_.is_(required_data_field, "null")
+        if apply_multi_hand_filter and isinstance(multi_hand_field, str) and multi_hand_field:
+            query = query.is_(multi_hand_field, str(multi_hand_value))
+        return query
+
+    def _build_database_samples(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        path_field: str,
+        data_path_field: Any,
+        data_extension: str,
+        sample_id_tail_parts: int | None,
+        visualize_ratio: float,
+    ) -> list[dict[str, Any]]:
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            video_path_value = row.get(path_field)
+            if not isinstance(video_path_value, str) or not video_path_value:
+                continue
+            if isinstance(data_path_field, str) and data_path_field:
+                data_path_value = row.get(data_path_field)
+            else:
+                data_path_value = None
+            if not isinstance(data_path_value, str) or not data_path_value:
+                data_path_value = video_path_value.replace(".mp4", data_extension)
+            sample_id = self._build_sample_id(video_path_value, tail_parts=sample_id_tail_parts)
+            samples.append(
+                {
+                    "video_path": ensure_oss_path(video_path_value, config_root=self._config_root),
+                    "data_path": ensure_oss_path(data_path_value, config_root=self._config_root),
+                    "sample_id": sample_id,
+                    "visualize": self._should_visualize(sample_id, visualize_ratio),
+                }
+            )
         return samples
 
     def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:
@@ -365,6 +431,57 @@ class DatabaseDataLoader(BaseDataLoader):
         digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
         random_value = int.from_bytes(digest, "big") / float(1 << 64)
         return random_value < visualize_ratio
+
+
+@register_data_loader("random_database_loader")
+class RandomDatabaseDataLoader(DatabaseDataLoader):
+    def load(self) -> list[dict[str, Any]]:
+        database = self._create_database_client()
+        table_name = self._require_non_empty_param("database_table")
+        path_field = str(self.params.get("path_field", "path"))
+        data_path_field = self.params.get("data_path_field")
+        required_data_field = self.params.get("required_data_field", "pose3d_hand_path")
+        apply_multi_hand_filter = bool(self.params.get("apply_multi_hand_filter", True))
+        multi_hand_field = self.params.get("multi_hand_field", "multi_hand_flag")
+        multi_hand_value = self.params.get("multi_hand_value", "False")
+        data_extension = str(self.params.get("data_extension", ".pose3d_hand"))
+        visualize_ratio = self._require_visualize_ratio()
+        sample_id_tail_parts = self._resolve_sample_id_tail_parts(default=1)
+        random_number_field = str(self.params.get("random_number_field", "random_number"))
+        random_threshold = float(self.params.get("random_threshold", 0.01))
+        query_limit_raw = self.params.get("query_limit", 100)
+        select_fields = self._build_database_select_fields(path_field=path_field, data_path_field=data_path_field)
+
+        if not 0.0 <= random_threshold <= 1.0:
+            raise ValueError("data.params.random_threshold must be between 0.0 and 1.0")
+
+        query = database.table(table_name).select(",".join(select_fields))
+        query = self._apply_database_common_filters(
+            query,
+            dataset_name=None,
+            required_data_field=required_data_field,
+            apply_multi_hand_filter=apply_multi_hand_filter,
+            multi_hand_field=multi_hand_field,
+            multi_hand_value=multi_hand_value,
+        )
+        query = query.lt(random_number_field, random_threshold)
+        if query_limit_raw is not None:
+            query_limit = int(query_limit_raw)
+            if query_limit <= 0:
+                raise ValueError("data.params.query_limit must be a positive integer when provided")
+            query = query.limit(query_limit)
+
+        response = query.execute()
+        rows = list(response.data)
+        print(f"Fetched {len(rows)} random sample(s) from database")
+        return self._build_database_samples(
+            rows,
+            path_field=path_field,
+            data_path_field=data_path_field,
+            data_extension=data_extension,
+            sample_id_tail_parts=sample_id_tail_parts,
+            visualize_ratio=visualize_ratio,
+        )
 
 
 @register_data_loader("processed")

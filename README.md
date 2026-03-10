@@ -42,6 +42,7 @@
 默认 data loader：
 
 - `[config/data/database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/database_loader.yaml)`
+- `[config/data/random_database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/random_database_loader.yaml)`
 
 默认 process 链：
 
@@ -160,6 +161,7 @@ python -m run.run   data=database_loader   runtime.num_workers=256 data.params.d
 ```bash
 python -m run.run --config-name pipeline runtime.num_workers=1 runtime.limit=10
 python -m run.run --config-name pipeline runtime.resume=true
+python -m run.run --config-name pipeline data=random_database_loader data.params.random_threshold=0.01 data.params.query_limit=100
 ```
 
 ### 4.2 运行 EgoDex 处理链
@@ -248,6 +250,7 @@ python -m run.run --config-name pipeline_render data.params.num_parts=4 data.par
 python -m run.run --config-name egodex_pipeline runtime.num_workers=8
 python -m run.run --config-name egodex_pipeline runtime.resume=true
 python -m run.run --config-name egodex_pipeline runtime.limit=100
+python -m run.run --config-name egodex_pipeline processes.1.params.retarget_scheme=pinch_plane
 python -m run.run --config-name pipeline_render data.params.part=0 data.params.num_parts=8
 ```
 
@@ -257,4 +260,3 @@ python -m run.run --config-name pipeline_render data.params.part=0 data.params.n
 - `pipeline_render` 依赖 processed 输出，不能直接对原始手部数据渲染。
 - 当前 EgoDex pipeline 默认走 database loader；如果本地调试请显式使用 `data=egodex_glob_loader`。
 - `requirements.txt` 里没有把所有可选依赖都列全，尤其是 `h5py`、`genesis-world`、`pinocchio`、`hpp-fcl`、`manopth`、`chumpy`。
-
