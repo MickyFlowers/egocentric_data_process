@@ -741,19 +741,6 @@ def _compute_palm_normal(joints, indices):
     return normal
 
 
-def _compute_index_aligned_wrist_anchor(joints, indices):
-    wrist = np.asarray(joints[indices["wrist"]], dtype=np.float32).reshape(3)
-    index_mcp = np.asarray(joints[indices["index_mcp"]], dtype=np.float32).reshape(3)
-    if not np.isfinite(wrist).all() or not np.isfinite(index_mcp).all():
-        return wrist.astype(np.float32, copy=False)
-
-    # In the current retarget convention, x is treated as the hand's lateral axis.
-    # Shift the wrist laterally so its left-right position matches the index MCP.
-    anchor = wrist.astype(np.float32, copy=True)
-    anchor[0] = index_mcp[0]
-    return anchor
-
-
 def _compute_cross_accumulated_y_axis(joints, wrist, thumb_idx, index_idx, side, *, normalize_inputs):
     near_count = min(2, len(thumb_idx), len(index_idx))
     y_sum = np.zeros(3, dtype=np.float32)
@@ -770,18 +757,189 @@ def _compute_cross_accumulated_y_axis(joints, wrist, thumb_idx, index_idx, side,
     return _normalize_vector(y_sum)
 
 
-def _compute_center_based_y_axis(joints, origin, thumb_idx, index_idx, side, *, normalize_inputs):
-    anchor = np.asarray(origin, dtype=np.float32).reshape(3)
-    thumb_center = np.asarray(joints[thumb_idx], dtype=np.float32).mean(axis=0)
-    index_center = np.asarray(joints[index_idx], dtype=np.float32).mean(axis=0)
-    thumb_vector = thumb_center - anchor
-    index_vector = index_center - anchor
-    if normalize_inputs:
-        thumb_vector = _normalize_vector(thumb_vector)
-        index_vector = _normalize_vector(index_vector)
-    if side == "left":
-        return _normalize_vector(np.cross(thumb_vector, index_vector))
-    return _normalize_vector(np.cross(index_vector, thumb_vector))
+def _finger_plane_weights(point_count):
+    weights = np.ones((max(0, int(point_count)),), dtype=np.float32)
+    if weights.size <= 0:
+        return weights
+    weights[0] = 2.0
+    weights[-1] = max(float(weights[-1]), 2.0)
+    return weights
+
+
+def _test_finger_weights(point_count):
+    weights = np.ones((max(0, int(point_count)),), dtype=np.float32)
+    if weights.size <= 0:
+        return weights
+    weights[0] = 4.0
+    weights[-1] = max(float(weights[-1]), 2.0)
+    return weights
+
+
+def _fit_weighted_plane_normal(points, weights):
+    samples = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    sample_weights = np.asarray(weights, dtype=np.float32).reshape(-1)
+    if samples.shape[0] != sample_weights.shape[0] or samples.shape[0] < 3:
+        return np.zeros((3,), dtype=np.float32)
+
+    finite_mask = np.isfinite(samples).all(axis=1)
+    finite_mask &= np.isfinite(sample_weights)
+    finite_mask &= sample_weights > 0.0
+    if int(np.count_nonzero(finite_mask)) < 3:
+        return np.zeros((3,), dtype=np.float32)
+
+    valid_samples = samples[finite_mask]
+    valid_weights = sample_weights[finite_mask]
+    weight_sum = float(valid_weights.sum())
+    if weight_sum <= 1e-8:
+        return np.zeros((3,), dtype=np.float32)
+
+    center = (valid_samples * valid_weights.reshape(-1, 1)).sum(axis=0) / weight_sum
+    centered = valid_samples - center.reshape(1, 3)
+    covariance = (centered * valid_weights.reshape(-1, 1)).T @ centered
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return np.zeros((3,), dtype=np.float32)
+
+    normal = eigenvectors[:, int(np.argmin(eigenvalues))]
+    return _normalize_vector(normal.astype(np.float32, copy=False))
+
+
+def _fit_weighted_line_to_points(points, weights):
+    samples = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    sample_weights = np.asarray(weights, dtype=np.float32).reshape(-1)
+    if samples.shape[0] != sample_weights.shape[0] or samples.shape[0] < 2:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    finite_mask = np.isfinite(samples).all(axis=1)
+    finite_mask &= np.isfinite(sample_weights)
+    finite_mask &= sample_weights > 0.0
+    if int(np.count_nonzero(finite_mask)) < 2:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    valid_samples = samples[finite_mask]
+    valid_weights = sample_weights[finite_mask]
+    weight_sum = float(valid_weights.sum())
+    if weight_sum <= 1e-8:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    center = (valid_samples * valid_weights.reshape(-1, 1)).sum(axis=0) / weight_sum
+    centered = valid_samples - center.reshape(1, 3)
+    covariance = (centered * valid_weights.reshape(-1, 1)).T @ centered
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return center.astype(np.float32, copy=False), np.zeros((3,), dtype=np.float32)
+
+    direction = eigenvectors[:, int(np.argmax(eigenvalues))]
+    return center.astype(np.float32, copy=False), _normalize_vector(direction.astype(np.float32, copy=False))
+
+
+def _build_axis_orthogonal_basis(axis, *, preferred=None):
+    direction = _normalize_vector(axis)
+    if np.linalg.norm(direction) < 1e-8:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    candidates: list[np.ndarray] = []
+    if preferred is not None:
+        candidates.append(np.asarray(preferred, dtype=np.float32).reshape(3))
+    candidates.extend(
+        [
+            np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            np.array([0.0, 1.0, 0.0], dtype=np.float32),
+            np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        ]
+    )
+
+    basis_u = np.zeros((3,), dtype=np.float32)
+    for candidate in candidates:
+        basis_u = _normalize_vector(_reject_vector(candidate, direction))
+        if np.linalg.norm(basis_u) >= 1e-8:
+            break
+    if np.linalg.norm(basis_u) < 1e-8:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+
+    basis_v = _normalize_vector(np.cross(direction, basis_u))
+    if np.linalg.norm(basis_v) < 1e-8:
+        return np.zeros((3,), dtype=np.float32), np.zeros((3,), dtype=np.float32)
+    return basis_u, basis_v
+
+
+def _fit_plane_normal_through_axis(points, weights, axis_point, axis_direction, *, preferred_normal=None):
+    axis_origin = np.asarray(axis_point, dtype=np.float32).reshape(3)
+    axis = _normalize_vector(axis_direction)
+    if np.linalg.norm(axis) < 1e-8:
+        return np.zeros((3,), dtype=np.float32)
+
+    basis_u, basis_v = _build_axis_orthogonal_basis(axis, preferred=preferred_normal)
+    if np.linalg.norm(basis_u) < 1e-8 or np.linalg.norm(basis_v) < 1e-8:
+        return np.zeros((3,), dtype=np.float32)
+
+    samples = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    sample_weights = np.asarray(weights, dtype=np.float32).reshape(-1)
+    if samples.shape[0] != sample_weights.shape[0] or samples.shape[0] < 2:
+        return np.zeros((3,), dtype=np.float32)
+
+    finite_mask = np.isfinite(samples).all(axis=1)
+    finite_mask &= np.isfinite(sample_weights)
+    finite_mask &= sample_weights > 0.0
+    if int(np.count_nonzero(finite_mask)) < 2:
+        return np.zeros((3,), dtype=np.float32)
+
+    valid_samples = samples[finite_mask]
+    valid_weights = sample_weights[finite_mask]
+    centered = valid_samples - axis_origin.reshape(1, 3)
+    residuals = np.stack(
+        [
+            centered @ basis_u,
+            centered @ basis_v,
+        ],
+        axis=1,
+    )
+    covariance = (residuals * valid_weights.reshape(-1, 1)).T @ residuals
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return np.zeros((3,), dtype=np.float32)
+
+    coeff = eigenvectors[:, int(np.argmin(eigenvalues))]
+    normal = _normalize_vector(
+        (float(coeff[0]) * basis_u + float(coeff[1]) * basis_v).astype(np.float32, copy=False)
+    )
+    if np.linalg.norm(normal) < 1e-8:
+        return np.zeros((3,), dtype=np.float32)
+
+    if preferred_normal is not None:
+        preferred = _normalize_vector(preferred_normal)
+        if np.linalg.norm(preferred) >= 1e-8 and float(np.dot(normal, preferred)) < 0.0:
+            normal = -normal
+    return normal.astype(np.float32, copy=False)
+
+
+def _compute_weighted_plane_y_axis(joints, wrist, thumb_idx, index_idx, side):
+    rough_y_axis = _compute_cross_accumulated_y_axis(
+        joints,
+        wrist,
+        thumb_idx,
+        index_idx,
+        side,
+        normalize_inputs=True,
+    )
+
+    thumb_points = np.asarray(joints[thumb_idx], dtype=np.float32).reshape(-1, 3)
+    index_points = np.asarray(joints[index_idx], dtype=np.float32).reshape(-1, 3)
+    plane_points = np.concatenate([thumb_points, index_points], axis=0)
+    plane_weights = np.concatenate(
+        [_finger_plane_weights(len(thumb_idx)), _finger_plane_weights(len(index_idx))],
+        axis=0,
+    )
+    plane_normal = _fit_weighted_plane_normal(plane_points, plane_weights)
+    if np.linalg.norm(plane_normal) < 1e-8:
+        return rough_y_axis
+
+    if np.linalg.norm(rough_y_axis) >= 1e-8 and float(np.dot(plane_normal, rough_y_axis)) < 0.0:
+        plane_normal = -plane_normal
+    return plane_normal.astype(np.float32, copy=False)
 
 
 def _project_vector(vector, axis):
@@ -826,24 +984,15 @@ def _project_point_onto_line(point, line_point, line_direction):
     return (anchor + np.dot(target - anchor, direction) * direction).astype(np.float32, copy=False)
 
 
-def _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side, *, y_axis_origin=None):
+def _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side):
     wrist = joints[indices["wrist"]]
     thumb_points = joints[thumb_idx]
     index_points = joints[index_idx]
     thumb_center = thumb_points.mean(axis=0)
     index_center = index_points.mean(axis=0)
-    origin = 0.5 * (joints[indices["thumb_tip"]] + joints[indices["index_tip"]])
-    if y_axis_origin is None:
-        y_axis_origin = wrist
+    origin = 0.5 * (joints[indices["index_tip"]] + joints[indices["middle_tip"]])
 
-    y_axis = _compute_center_based_y_axis(
-        joints,
-        y_axis_origin,
-        thumb_idx,
-        index_idx,
-        side,
-        normalize_inputs=True,
-    )
+    y_axis = _compute_weighted_plane_y_axis(joints, wrist, thumb_idx, index_idx, side)
 
     if side == "right":
         x_raw = thumb_center - index_center
@@ -895,7 +1044,101 @@ def compute_eef_poses_legacy(joints_cam, valid, side):
     return poses
 
 
-def compute_eef_poses_pinch_plane(joints_cam, valid, side):
+def _compute_eef_pose_pinch_plane_frame(joints, indices, thumb_idx, index_idx, side):
+    wrist = joints[indices["wrist"]]
+    thumb_tip = joints[indices["thumb_tip"]]
+    index_tip = joints[indices["index_tip"]]
+    origin = (0.5 * (thumb_tip + index_tip)).astype(np.float32, copy=False)
+
+    thumb_line_point, thumb_line_direction = _fit_line_to_points(joints[thumb_idx], anchor=wrist)
+    index_line_point, index_line_direction = _fit_line_to_points(joints[index_idx], anchor=wrist)
+    projected_thumb_tip = _project_point_onto_line(thumb_tip, thumb_line_point, thumb_line_direction)
+    projected_index_tip = _project_point_onto_line(index_tip, index_line_point, index_line_direction)
+    y_axis = _compute_weighted_plane_y_axis(joints, wrist, thumb_idx, index_idx, side)
+    if side == "left":
+        x_raw = projected_index_tip - projected_thumb_tip
+    else:
+        x_raw = projected_thumb_tip - projected_index_tip
+    x_raw = _reject_vector(x_raw, y_axis)
+    x_axis = _normalize_vector(x_raw)
+    z_axis = _normalize_vector(np.cross(x_axis, y_axis))
+
+    if np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
+        pose_frame = _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side)
+        if pose_frame is None:
+            return None
+        _, x_axis, y_axis, z_axis = pose_frame
+
+    return origin, x_axis, y_axis, z_axis
+
+
+def _compute_eef_pose_test_frame(joints, indices, thumb_idx, index_idx, side):
+    wrist = joints[indices["wrist"]]
+    thumb_points = np.asarray(joints[thumb_idx], dtype=np.float32).reshape(-1, 3)
+    index_points = np.asarray(joints[index_idx], dtype=np.float32).reshape(-1, 3)
+    thumb_weights = _test_finger_weights(len(thumb_idx))
+    index_weights = _test_finger_weights(len(index_idx))
+
+    thumb_line_point, thumb_line_direction = _fit_weighted_line_to_points(thumb_points, thumb_weights)
+    index_line_point, index_line_direction = _fit_weighted_line_to_points(index_points, index_weights)
+    if np.linalg.norm(thumb_line_direction) < 1e-8 or np.linalg.norm(index_line_direction) < 1e-8:
+        return _compute_eef_pose_pinch_plane_frame(joints, indices, thumb_idx, index_idx, side)
+
+    thumb_projected = np.stack(
+        [
+            _project_point_onto_line(point, thumb_line_point, thumb_line_direction)
+            for point in thumb_points
+        ],
+        axis=0,
+    ).astype(np.float32, copy=False)
+    index_projected = np.stack(
+        [
+            _project_point_onto_line(point, index_line_point, index_line_direction)
+            for point in index_points
+        ],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+    thumb_x_projected = thumb_projected[-1]
+    index_x_projected = index_projected[-1]
+    if side == "left":
+        x_axis = _normalize_vector(index_x_projected - thumb_x_projected)
+    else:
+        x_axis = _normalize_vector(thumb_x_projected - index_x_projected)
+    if np.linalg.norm(x_axis) < 1e-8:
+        return _compute_eef_pose_pinch_plane_frame(joints, indices, thumb_idx, index_idx, side)
+
+    rough_y_axis = _compute_cross_accumulated_y_axis(
+        joints,
+        wrist,
+        thumb_idx,
+        index_idx,
+        side,
+        normalize_inputs=True,
+    )
+    plane_points = np.concatenate([thumb_projected, index_projected], axis=0)
+    plane_weights = np.concatenate([thumb_weights, index_weights], axis=0)
+    x_axis_origin = 0.5 * (thumb_x_projected + index_x_projected)
+    y_axis = _fit_plane_normal_through_axis(
+        plane_points,
+        plane_weights,
+        x_axis_origin,
+        x_axis,
+        preferred_normal=rough_y_axis,
+    )
+    if np.linalg.norm(y_axis) < 1e-8:
+        return _compute_eef_pose_pinch_plane_frame(joints, indices, thumb_idx, index_idx, side)
+
+    z_axis = _normalize_vector(np.cross(x_axis, y_axis))
+    if np.linalg.norm(z_axis) < 1e-8:
+        return _compute_eef_pose_pinch_plane_frame(joints, indices, thumb_idx, index_idx, side)
+
+    # The test scheme keeps the position defined by the midpoint of thumb/index tips.
+    origin = (0.5 * (joints[indices["thumb_tip"]] + joints[indices["index_tip"]])).astype(np.float32, copy=False)
+    return origin, x_axis, y_axis, z_axis
+
+
+def _compute_pose_sequence_with_frame_builder(joints_cam, valid, side, frame_builder):
     points = ensure_float32(joints_cam)
     valid_mask = ensure_bool(valid).reshape(-1)
     indices = _joint_indices(points.shape[1])
@@ -908,44 +1151,10 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
             continue
 
         joints = points[frame_index]
-        wrist = joints[indices["wrist"]]
-        y_axis_origin = _compute_index_aligned_wrist_anchor(joints, indices)
-        thumb_tip = joints[indices["thumb_tip"]]
-        index_tip = joints[indices["index_tip"]]
-        origin = (0.5 * (thumb_tip + index_tip)).astype(np.float32, copy=False)
-
-        thumb_line_point, thumb_line_direction = _fit_line_to_points(joints[thumb_idx], anchor=wrist)
-        index_line_point, index_line_direction = _fit_line_to_points(joints[index_idx], anchor=wrist)
-        projected_thumb_tip = _project_point_onto_line(thumb_tip, thumb_line_point, thumb_line_direction)
-        projected_index_tip = _project_point_onto_line(index_tip, index_line_point, index_line_direction)
-        y_axis = _compute_cross_accumulated_y_axis(
-            joints,
-            y_axis_origin,
-            thumb_idx,
-            index_idx,
-            side,
-            normalize_inputs=True,
-        )
-        if side == "left":
-            x_raw = projected_index_tip - projected_thumb_tip
-        else:
-            x_raw = projected_thumb_tip - projected_index_tip
-        x_raw = _reject_vector(x_raw, y_axis)
-        x_axis = _normalize_vector(x_raw)
-        z_axis = _normalize_vector(np.cross(x_axis, y_axis))
-
-        if np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
-            pose_frame = _compute_eef_pose_legacy_frame(
-                joints,
-                indices,
-                thumb_idx,
-                index_idx,
-                side,
-                y_axis_origin=y_axis_origin,
-            )
-            if pose_frame is None:
-                continue
-            _, x_axis, y_axis, z_axis = pose_frame
+        pose_frame = frame_builder(joints, indices, thumb_idx, index_idx, side)
+        if pose_frame is None:
+            continue
+        origin, x_axis, y_axis, z_axis = pose_frame
 
         rotation = np.stack([x_axis, y_axis, z_axis], axis=1).astype(np.float32, copy=False)
         axis_angle = rotation_matrix_to_axis_angle(rotation)
@@ -956,10 +1165,30 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
     return poses
 
 
+def compute_eef_poses_pinch_plane(joints_cam, valid, side):
+    return _compute_pose_sequence_with_frame_builder(
+        joints_cam,
+        valid,
+        side,
+        _compute_eef_pose_pinch_plane_frame,
+    )
+
+
+def compute_eef_poses_test(joints_cam, valid, side):
+    return _compute_pose_sequence_with_frame_builder(
+        joints_cam,
+        valid,
+        side,
+        _compute_eef_pose_test_frame,
+    )
+
+
 def compute_eef_poses(joints_cam, valid, side, scheme="legacy"):
     scheme_name = str(scheme or "legacy").strip().lower()
     if scheme_name == "legacy":
         return compute_eef_poses_legacy(joints_cam, valid, side)
     if scheme_name == "pinch_plane":
         return compute_eef_poses_pinch_plane(joints_cam, valid, side)
+    if scheme_name == "test":
+        return compute_eef_poses_test(joints_cam, valid, side)
     raise ValueError(f"unsupported retarget scheme: {scheme}")

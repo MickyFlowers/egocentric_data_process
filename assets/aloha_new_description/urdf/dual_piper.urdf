@@ -196,7 +196,7 @@
         </inertial>
     </link>
     <joint name="left_tcp_joint" type="fixed">
-        <origin xyz="0 0 0.12" rpy="0 0 0" />
+        <origin xyz="0 0 0.15" rpy="0 0 0" />
         <parent link="left_link6" />
         <child link="left_tcp" />
     </joint>
@@ -507,7 +507,7 @@
         </inertial>
     </link>
     <joint name="right_tcp_joint" type="fixed">
-        <origin xyz="0 0 0.12" rpy="0 0 0" />
+        <origin xyz="0 0 0.15" rpy="0 0 0" />
         <parent link="right_link6" />
         <child link="right_tcp" />
     </joint>

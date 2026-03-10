@@ -1,6 +1,6 @@
 - name: render_filter
   type: render_filter
-  enabled: true
+  enabled: false
   params:
     reachable_ratio_threshold: 0.9
     collision_ratio_threshold: 0.05
