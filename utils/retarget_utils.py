@@ -741,6 +741,19 @@ def _compute_palm_normal(joints, indices):
     return normal
 
 
+def _compute_index_aligned_wrist_anchor(joints, indices):
+    wrist = np.asarray(joints[indices["wrist"]], dtype=np.float32).reshape(3)
+    index_mcp = np.asarray(joints[indices["index_mcp"]], dtype=np.float32).reshape(3)
+    if not np.isfinite(wrist).all() or not np.isfinite(index_mcp).all():
+        return wrist.astype(np.float32, copy=False)
+
+    # In the current retarget convention, x is treated as the hand's lateral axis.
+    # Shift the wrist laterally so its left-right position matches the index MCP.
+    anchor = wrist.astype(np.float32, copy=True)
+    anchor[0] = index_mcp[0]
+    return anchor
+
+
 def _compute_cross_accumulated_y_axis(joints, wrist, thumb_idx, index_idx, side, *, normalize_inputs):
     near_count = min(2, len(thumb_idx), len(index_idx))
     y_sum = np.zeros(3, dtype=np.float32)
@@ -755,6 +768,20 @@ def _compute_cross_accumulated_y_axis(joints, wrist, thumb_idx, index_idx, side,
         else:
             y_sum += np.cross(index_vector, thumb_vector)
     return _normalize_vector(y_sum)
+
+
+def _compute_center_based_y_axis(joints, origin, thumb_idx, index_idx, side, *, normalize_inputs):
+    anchor = np.asarray(origin, dtype=np.float32).reshape(3)
+    thumb_center = np.asarray(joints[thumb_idx], dtype=np.float32).mean(axis=0)
+    index_center = np.asarray(joints[index_idx], dtype=np.float32).mean(axis=0)
+    thumb_vector = thumb_center - anchor
+    index_vector = index_center - anchor
+    if normalize_inputs:
+        thumb_vector = _normalize_vector(thumb_vector)
+        index_vector = _normalize_vector(index_vector)
+    if side == "left":
+        return _normalize_vector(np.cross(thumb_vector, index_vector))
+    return _normalize_vector(np.cross(index_vector, thumb_vector))
 
 
 def _project_vector(vector, axis):
@@ -799,17 +826,19 @@ def _project_point_onto_line(point, line_point, line_direction):
     return (anchor + np.dot(target - anchor, direction) * direction).astype(np.float32, copy=False)
 
 
-def _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side):
+def _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side, *, y_axis_origin=None):
     wrist = joints[indices["wrist"]]
     thumb_points = joints[thumb_idx]
     index_points = joints[index_idx]
     thumb_center = thumb_points.mean(axis=0)
     index_center = index_points.mean(axis=0)
-    origin = 0.5 * (joints[indices["index_tip"]] + joints[indices["middle_tip"]])
+    origin = 0.5 * (joints[indices["thumb_tip"]] + joints[indices["index_tip"]])
+    if y_axis_origin is None:
+        y_axis_origin = wrist
 
-    y_axis = _compute_cross_accumulated_y_axis(
+    y_axis = _compute_center_based_y_axis(
         joints,
-        wrist,
+        y_axis_origin,
         thumb_idx,
         index_idx,
         side,
@@ -880,6 +909,7 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
 
         joints = points[frame_index]
         wrist = joints[indices["wrist"]]
+        y_axis_origin = _compute_index_aligned_wrist_anchor(joints, indices)
         thumb_tip = joints[indices["thumb_tip"]]
         index_tip = joints[indices["index_tip"]]
         origin = (0.5 * (thumb_tip + index_tip)).astype(np.float32, copy=False)
@@ -890,7 +920,7 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
         projected_index_tip = _project_point_onto_line(index_tip, index_line_point, index_line_direction)
         y_axis = _compute_cross_accumulated_y_axis(
             joints,
-            wrist,
+            y_axis_origin,
             thumb_idx,
             index_idx,
             side,
@@ -905,7 +935,14 @@ def compute_eef_poses_pinch_plane(joints_cam, valid, side):
         z_axis = _normalize_vector(np.cross(x_axis, y_axis))
 
         if np.linalg.norm(x_axis) < 1e-8 or np.linalg.norm(y_axis) < 1e-8 or np.linalg.norm(z_axis) < 1e-8:
-            pose_frame = _compute_eef_pose_legacy_frame(joints, indices, thumb_idx, index_idx, side)
+            pose_frame = _compute_eef_pose_legacy_frame(
+                joints,
+                indices,
+                thumb_idx,
+                index_idx,
+                side,
+                y_axis_origin=y_axis_origin,
+            )
             if pose_frame is None:
                 continue
             _, x_axis, y_axis, z_axis = pose_frame

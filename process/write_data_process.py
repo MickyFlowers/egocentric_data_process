@@ -22,7 +22,14 @@ class WriteDataProcess(BaseProcess):
         if not isinstance(eef_payload, dict):
             raise KeyError("missing 'eef' in sample for write_data process")
 
+        allow_missing_ik = bool(self.params.get("allow_missing_ik", False))
         ik_payload = sample.get("ik")
+        ik_available = isinstance(ik_payload, dict)
+        if not ik_available:
+            if allow_missing_ik:
+                ik_payload = {}
+            else:
+                raise KeyError("missing 'ik' in sample for write_data process")
         if not isinstance(ik_payload, dict):
             raise KeyError("missing 'ik' in sample for write_data process")
 
@@ -54,6 +61,7 @@ class WriteDataProcess(BaseProcess):
             sample=sample,
             eef_payload=eef_payload,
             ik_payload=ik_payload,
+            ik_available=ik_available,
             frame_count=frame_count,
             data_remote_path=parquet_remote_path,
             sample_metadata_remote_path=sample_metadata_remote_path,
@@ -200,6 +208,7 @@ class WriteDataProcess(BaseProcess):
         sample: dict[str, Any],
         eef_payload: dict[str, Any],
         ik_payload: dict[str, Any],
+        ik_available: bool,
         frame_count: int,
         data_remote_path: str,
         sample_metadata_remote_path: str,
@@ -232,6 +241,7 @@ class WriteDataProcess(BaseProcess):
             "fps": self._safe_float(eef_payload.get("fps", sample.get("fps"))),
             "visualize": bool(sample.get("visualize", False)),
             "last_process": sample.get("last_process"),
+            "ik_available": ik_available,
             "left_frame": frame_map.get("left"),
             "right_frame": frame_map.get("right"),
             "image_height": image_height,

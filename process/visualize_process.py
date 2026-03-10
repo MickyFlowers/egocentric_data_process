@@ -24,14 +24,17 @@ class VisualizeProcess(BaseProcess):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
         self.strict = bool(self.params.get("strict", False))
+        self._ik_enabled = self._resolve_ik_enabled()
 
         hand_params = self._build_hand_params()
         eef_params = self._build_eef_params()
-        ik_params = self._build_ik_params()
 
         self._hand_visualizer = LoadDataProcess(self._build_helper_config("hand_visualize_helper", hand_params))
         self._eef_visualizer = RetargetProcess(self._build_helper_config("eef_visualize_helper", eef_params))
-        self._ik_visualizer = InverseKinematicsProcess(self._build_helper_config("ik_visualize_helper", ik_params))
+        self._ik_visualizer: InverseKinematicsProcess | None = None
+        if self._ik_enabled:
+            ik_params = self._build_ik_params()
+            self._ik_visualizer = InverseKinematicsProcess(self._build_helper_config("ik_visualize_helper", ik_params))
 
     def run(self, sample: dict[str, Any], context: Any) -> dict[str, Any]:
         if not bool(sample.get("visualize", False)):
@@ -41,11 +44,14 @@ class VisualizeProcess(BaseProcess):
             raise ValueError("visualize process requires pipeline context")
 
         errors: list[str] = []
-        for step_name, step_fn in (
+        steps: list[tuple[str, Any]] = [
             ("hand", self._render_hand),
             ("eef", self._render_eef),
-            ("ik", self._render_ik),
-        ):
+        ]
+        if self._ik_enabled:
+            steps.append(("ik", self._render_ik))
+
+        for step_name, step_fn in steps:
             try:
                 step_fn(sample=sample, context=context)
             except Exception as exc:
@@ -84,6 +90,8 @@ class VisualizeProcess(BaseProcess):
         )
 
     def _render_ik(self, *, sample: dict[str, Any], context: Any) -> None:
+        if self._ik_visualizer is None:
+            return
         ik_payload = self._resolve_ik_payload(sample)
         eef_payload = self._resolve_eef_payload(sample)
         side_configs = self._ik_visualizer._resolve_side_configs()
@@ -260,6 +268,7 @@ class VisualizeProcess(BaseProcess):
 
     def _build_ik_params(self) -> dict[str, Any]:
         params = self._optional_params_dict(self.params.get("ik"), field_name="ik")
+        params.pop("enabled", None)
         common_output_dir = self.params.get("output_dir")
         if common_output_dir is not None:
             params.setdefault("output_dir", common_output_dir)
@@ -282,6 +291,14 @@ class VisualizeProcess(BaseProcess):
                 params.setdefault(key, self.params[key])
         params.setdefault("urdf_path", "./assets/aloha_new_description/urdf/dual_piper.urdf")
         return params
+
+    def _resolve_ik_enabled(self) -> bool:
+        ik_params = self.params.get("ik")
+        if ik_params is None:
+            return True
+        if not isinstance(ik_params, dict):
+            raise TypeError("visualize.params.ik must be a mapping when provided")
+        return bool(ik_params.get("enabled", True))
 
     def _build_helper_config(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         return {

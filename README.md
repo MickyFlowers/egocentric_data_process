@@ -163,6 +163,7 @@ python -m run.run --config-name pipeline runtime.num_workers=1 runtime.limit=10
 python -m run.run --config-name pipeline runtime.resume=true
 python -m run.run --config-name pipeline data=random_database_loader data.params.random_threshold=0.01 data.params.query_limit=100
 python -m run.run --config-name pipeline data=random_database_loader data.params.dataset_name=Ego10k data.params.random_threshold=0.01 data.params.query_limit=100
+python -m run.run --config-name pipeline processes=process_no_ik
 ```
 
 ### 4.2 运行 EgoDex 处理链

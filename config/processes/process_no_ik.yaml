@@ -1,0 +1,67 @@
+- name: load_data
+  type: load_data
+  enabled: true
+  params:
+    output_dir: &shared_output_dir
+      local: ./outputs
+      remote: oss://ss-oss1/data/dataset/egocentric/${data.params.dataset_name}/processed
+    mano_model_dir: ./assets/mano_v1_2/models
+    device: cpu
+    use_pca: false
+    flat_hand_mean: true
+    fix_shapedirs: true
+
+- name: retarget
+  type: retarget
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    retarget_scheme: legacy
+    axis_length: 0.03
+    workspace_center: [0.25, 0.0, 0.1]
+    camera_elevation_deg: 45.0
+    gripper_filter:
+      enabled: true
+      hold_invalid: true
+      median_window: 3
+      ema_alpha: 0.35
+      ema_passes: 1
+    use_ekf: true
+    ekf:
+      edge_pad: 24
+      q_pos: 120.0
+      q_rot: 120.0
+      r_pos: 2.0e-3
+      r_rot: 4.0e-3
+      innovation_gate_pos: null
+      innovation_gate_rot: 1.2
+      outlier_noise_scale: 1.0e6
+      rotvec_wrap_count: 2
+    left_base_translation: [0.0, 0.3, 0.0]
+    right_base_translation: [0.0, -0.3, 0.0]
+    indent: 2
+
+- name: write_data
+  type: write_data
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    allow_missing_ik: true
+    compression: snappy
+    metadata_indent: 2
+    metadata_sort_keys: true
+
+- name: visualize
+  type: visualize
+  enabled: true
+  params:
+    output_dir: *shared_output_dir
+    strict: false
+    hand: {}
+    eef:
+      axis_length: 0.03
+      smooth_poses: true
+      left_base_translation: [0.0, 0.3, 0.0]
+      right_base_translation: [0.0, -0.3, 0.0]
+    ik:
+      enabled: false
