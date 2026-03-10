@@ -1,5 +1,6 @@
 type: random_database_loader
 params:
+  # Use "all_datasets" to sample across the whole table, or set a real dataset_name to filter first.
   dataset_name: "all_datasets"
   database_url: "http://192.168.3.208:54321"
   database_key: "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"

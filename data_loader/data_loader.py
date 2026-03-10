@@ -437,6 +437,8 @@ class DatabaseDataLoader(BaseDataLoader):
 class RandomDatabaseDataLoader(DatabaseDataLoader):
     def load(self) -> list[dict[str, Any]]:
         database = self._create_database_client()
+        dataset_name = self.params.get("dataset_name")
+        dataset_name_filter = self._resolve_random_dataset_filter(dataset_name)
         table_name = self._require_non_empty_param("database_table")
         path_field = str(self.params.get("path_field", "path"))
         data_path_field = self.params.get("data_path_field")
@@ -458,7 +460,7 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
         query = database.table(table_name).select(",".join(select_fields))
         query = self._apply_database_common_filters(
             query,
-            dataset_name=None,
+            dataset_name=dataset_name_filter,
             required_data_field=required_data_field,
             apply_multi_hand_filter=apply_multi_hand_filter,
             multi_hand_field=multi_hand_field,
@@ -473,7 +475,10 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
 
         response = query.execute()
         rows = list(response.data)
-        print(f"Fetched {len(rows)} random sample(s) from database")
+        if dataset_name_filter is None:
+            print(f"Fetched {len(rows)} random sample(s) from database")
+        else:
+            print(f"Fetched {len(rows)} random sample(s) from database for dataset={dataset_name_filter}")
         samples = self._build_database_samples(
             rows,
             path_field=path_field,
@@ -483,6 +488,17 @@ class RandomDatabaseDataLoader(DatabaseDataLoader):
             visualize_ratio=visualize_ratio,
         )
         return self._ensure_unique_sample_ids(samples, visualize_ratio=visualize_ratio)
+
+    @staticmethod
+    def _resolve_random_dataset_filter(dataset_name: Any) -> str | None:
+        if not isinstance(dataset_name, str):
+            return None
+        normalized = dataset_name.strip()
+        if not normalized:
+            return None
+        if normalized.lower() in {"all_datasets", "all", "*", "none", "null"}:
+            return None
+        return normalized
 
     def _ensure_unique_sample_ids(
         self,
