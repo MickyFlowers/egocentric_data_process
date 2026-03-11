@@ -1,0 +1,9 @@
+type: csv
+params:
+  dataset_name: "ml-egodex"
+  csv_path: /Users/cyxovo/Downloads/samples.csv
+  is_ml_egodex: true
+  path_field: path
+  data_extension: .hdf5
+  sample_id_tail_parts: 3
+  visualize_ratio: 0.0

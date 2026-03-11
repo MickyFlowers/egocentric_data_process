@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -272,6 +273,159 @@ class EgoDexDataLoader(BaseDataLoader):
                 }
             )
 
+        return samples
+
+    def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:
+        if visualize_ratio <= 0.0:
+            return False
+        if visualize_ratio >= 1.0:
+            return True
+
+        digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
+        random_value = int.from_bytes(digest, "big") / float(1 << 64)
+        return random_value < visualize_ratio
+
+
+@register_data_loader("csv")
+class CsvDataLoader(BaseDataLoader):
+    def load(self) -> list[dict[str, Any]]:
+        csv_path = self._resolve_csv_path()
+        path_field = str(self.params.get("path_field", "path"))
+        data_path_field = self.params.get("data_path_field")
+        visualize_ratio = self._require_visualize_ratio()
+        is_ml_egodex = self._require_bool_param("is_ml_egodex", default=False)
+        match_token = str(self.params.get("ml_egodex_match_token", "/ml-egodex/")).strip().lower()
+        if not match_token:
+            raise ValueError("data.params.ml_egodex_match_token must be a non-empty string")
+
+        default_data_extension = ".hdf5" if is_ml_egodex else ".pose3d_hand"
+        data_extension = str(self.params.get("data_extension", default_data_extension))
+        default_tail_parts = 3 if is_ml_egodex else 2
+        sample_id_tail_parts = self._resolve_sample_id_tail_parts(
+            default=default_tail_parts,
+            dataset_name="ml-egodex" if is_ml_egodex else None,
+        )
+        encoding = str(self.params.get("encoding", "utf-8"))
+        delimiter = str(self.params.get("delimiter", ","))
+
+        samples: list[dict[str, Any]] = []
+        with csv_path.open("r", encoding=encoding, newline="") as file_obj:
+            reader = csv.DictReader(file_obj, delimiter=delimiter)
+            fieldnames = list(reader.fieldnames or [])
+            if path_field not in fieldnames:
+                raise KeyError(f"CSV is missing required column '{path_field}': {csv_path}")
+            if isinstance(data_path_field, str) and data_path_field and data_path_field not in fieldnames:
+                raise KeyError(f"CSV is missing configured data_path_field '{data_path_field}': {csv_path}")
+
+            for row in reader:
+                raw_video_path = row.get(path_field)
+                if not isinstance(raw_video_path, str):
+                    continue
+
+                video_path_value = raw_video_path.strip()
+                if not video_path_value:
+                    continue
+
+                row_is_ml_egodex = match_token in video_path_value.lower()
+                if row_is_ml_egodex != is_ml_egodex:
+                    continue
+
+                if isinstance(data_path_field, str) and data_path_field:
+                    raw_data_path = row.get(data_path_field)
+                    if not isinstance(raw_data_path, str) or not raw_data_path.strip():
+                        continue
+                    data_path_value = raw_data_path.strip()
+                else:
+                    data_path_value = self._replace_path_suffix(video_path_value, data_extension)
+
+                sample_id = self._build_sample_id(video_path_value, tail_parts=sample_id_tail_parts)
+                samples.append(
+                    {
+                        "video_path": ensure_oss_path(video_path_value, config_root=self._config_root),
+                        "data_path": ensure_oss_path(data_path_value, config_root=self._config_root),
+                        "sample_id": sample_id,
+                        "visualize": self._should_visualize(sample_id, visualize_ratio),
+                    }
+                )
+
+        samples = self._ensure_unique_sample_ids(samples, visualize_ratio=visualize_ratio)
+        print(f"[data_loader] loaded {len(samples)} sample(s) from csv_path={csv_path}, is_ml_egodex={is_ml_egodex}")
+        return samples
+
+    def _resolve_csv_path(self) -> Path:
+        csv_path_value = self.params.get("csv_path")
+        if not isinstance(csv_path_value, str) or not csv_path_value:
+            raise ValueError("data.params.csv_path is required for csv data loader")
+
+        csv_path = Path(csv_path_value).expanduser()
+        if not csv_path.is_absolute():
+            csv_path = (self._config_root / csv_path).resolve()
+        else:
+            csv_path = csv_path.resolve()
+
+        if not csv_path.exists():
+            raise FileNotFoundError(f"csv_path does not exist: {csv_path}")
+        if not csv_path.is_file():
+            raise FileNotFoundError(f"csv_path is not a file: {csv_path}")
+        return csv_path
+
+    def _require_bool_param(self, name: str, *, default: bool) -> bool:
+        raw_value = self.params.get(name, default)
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, (int, float)) and raw_value in {0, 1}:
+            return bool(raw_value)
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off"}:
+                return False
+        raise ValueError(f"data.params.{name} must be a boolean, got {raw_value!r}")
+
+    def _require_visualize_ratio(self) -> float:
+        visualize_ratio = float(self.params.get("visualize_ratio", 0.0))
+        if not 0.0 <= visualize_ratio <= 1.0:
+            raise ValueError("data.params.visualize_ratio must be between 0.0 and 1.0")
+        return visualize_ratio
+
+    def _replace_path_suffix(self, path_value: str, suffix: str) -> str:
+        normalized_path = path_value.strip().replace("\\", "/")
+        prefix = ""
+        path_without_prefix = normalized_path
+        if normalized_path.startswith("oss://"):
+            prefix = "oss://"
+            path_without_prefix = normalized_path[len(prefix) :]
+        return f"{prefix}{PurePosixPath(path_without_prefix).with_suffix(suffix)}"
+
+    def _ensure_unique_sample_ids(
+        self,
+        samples: list[dict[str, Any]],
+        *,
+        visualize_ratio: float,
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for sample in samples:
+            sample_id = sample.get("sample_id")
+            if not isinstance(sample_id, str) or not sample_id:
+                raise KeyError("csv loader requires non-empty string sample_id for every sample")
+            grouped.setdefault(sample_id, []).append(sample)
+
+        collision_count = 0
+        for sample_id, group in grouped.items():
+            if len(group) <= 1:
+                continue
+
+            collision_count += len(group)
+            for sample in group:
+                video_path = str(sample.get("video_path", ""))
+                digest = hashlib.blake2b(video_path.encode("utf-8", "ignore"), digest_size=4).hexdigest()
+                unique_id = f"{sample_id}_{digest}"
+                sample["sample_id"] = unique_id
+                sample["visualize"] = self._should_visualize(unique_id, visualize_ratio)
+
+        if collision_count > 0:
+            print(f"[data_loader] resolved {collision_count} colliding sample_id(s) in csv loader")
         return samples
 
     def _should_visualize(self, sample_id: str, visualize_ratio: float) -> bool:

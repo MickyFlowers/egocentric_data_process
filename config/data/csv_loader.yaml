@@ -1,0 +1,8 @@
+type: csv
+params:
+  dataset_name: "csv-non-ml-egodex"
+  csv_path: /Users/cyxovo/Downloads/samples.csv
+  is_ml_egodex: false
+  path_field: path
+  sample_id_tail_parts: 2
+  visualize_ratio: 0.0

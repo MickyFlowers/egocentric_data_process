@@ -43,6 +43,7 @@
 
 - `[config/data/database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/database_loader.yaml)`
 - `[config/data/random_database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/random_database_loader.yaml)`
+- `[config/data/csv_loader.yaml](/Users/cyxovo/ego_data_process/config/data/csv_loader.yaml)`
 
 默认 process 链：
 
@@ -62,6 +63,7 @@
 默认 data loader：
 
 - `[config/data/egodex_database_loader.yaml](/Users/cyxovo/ego_data_process/config/data/egodex_database_loader.yaml)`
+- `[config/data/egodex_csv_loader.yaml](/Users/cyxovo/ego_data_process/config/data/egodex_csv_loader.yaml)`
 
 本地目录版 data loader：
 
@@ -163,6 +165,7 @@ python -m run.run --config-name pipeline runtime.num_workers=1 runtime.limit=10
 python -m run.run --config-name pipeline runtime.resume=true
 python -m run.run --config-name pipeline data=random_database_loader data.params.random_threshold=0.01 data.params.query_limit=100
 python -m run.run --config-name pipeline data=random_database_loader data.params.dataset_name=Ego10k data.params.random_threshold=0.01 data.params.query_limit=100
+python -m run.run --config-name pipeline data=csv_loader
 python -m run.run --config-name pipeline processes=process_no_ik
 ```
 
@@ -178,6 +181,12 @@ python -m run.run --config-name egodex_pipeline
 
 ```bash
 python -m run.run --config-name egodex_pipeline data=egodex_glob_loader
+```
+
+如果要改成读取 `/Users/cyxovo/Downloads/samples.csv` 里仅 `ml-egodex` 的样本：
+
+```bash
+python -m run.run --config-name egodex_pipeline data=egodex_csv_loader
 ```
 
 如果只想处理少量样本：
