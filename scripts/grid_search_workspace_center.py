@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,12 @@ from process.inverse_kinematics_process import InverseKinematicsProcess
 from process.load_data_process import LoadDataProcess
 from process.retarget_process import RetargetProcess
 from utils.oss_utils import configure_path_mapping
+
+try:
+    import ray
+except ImportError:  # pragma: no cover - optional dependency
+    ray = None
+
 project_root = Path(__file__).resolve().parents[1]
 
 def _load_process_configs(config_path: Path) -> dict[str, dict[str, Any]]:
@@ -157,12 +164,14 @@ def _evaluate_workspace_center(
     retarget_template: dict[str, Any],
     ik_process: InverseKinematicsProcess,
     workspace_center: list[float],
+    retarget_scheme: str,
     objective: str,
     threshold: float,
 ) -> dict[str, Any]:
     retarget_config = copy.deepcopy(retarget_template)
     retarget_config.setdefault("params", {})
     retarget_config["params"]["workspace_center"] = workspace_center
+    retarget_config["params"]["retarget_scheme"] = str(retarget_scheme).strip().lower() or "test"
     retarget_process = RetargetProcess(retarget_config)
 
     sample_results: list[dict[str, Any]] = []
@@ -233,6 +242,191 @@ def _evaluate_workspace_center(
     }
 
 
+def _build_workspace_centers(*, x_values: list[float], workspace_y: float, z_values: list[float]) -> list[list[float]]:
+    centers: list[list[float]] = []
+    for x_value in x_values:
+        for z_value in z_values:
+            centers.append([float(x_value), float(workspace_y), float(z_value)])
+    return centers
+
+
+def _batched_workspace_centers(
+    workspace_centers: list[list[float]],
+    *,
+    batch_size: int,
+) -> list[list[list[float]]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    return [
+        workspace_centers[start_index : start_index + batch_size]
+        for start_index in range(0, len(workspace_centers), batch_size)
+    ]
+
+
+def _evaluate_workspace_centers_batch(
+    *,
+    loaded_samples: list[dict[str, Any]],
+    retarget_template: dict[str, Any],
+    ik_process: InverseKinematicsProcess,
+    workspace_centers: list[list[float]],
+    retarget_scheme: str,
+    objective: str,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    return [
+        _evaluate_workspace_center(
+            loaded_samples=loaded_samples,
+            retarget_template=retarget_template,
+            ik_process=ik_process,
+            workspace_center=workspace_center,
+            retarget_scheme=retarget_scheme,
+            objective=objective,
+            threshold=threshold,
+        )
+        for workspace_center in workspace_centers
+    ]
+
+
+def _print_progress(
+    *,
+    index: int,
+    total: int,
+    result: dict[str, Any],
+) -> None:
+    print(
+        f"[{index}/{total}] workspace_center={result['workspace_center']} "
+        f"objective={result['objective']} "
+        f"pass_ratio={result['pass_ratio']} "
+        f"left_mean={result['left_reachable_ratio_mean']} "
+        f"right_mean={result['right_reachable_ratio_mean']}"
+    )
+
+
+if ray is not None:
+
+    @ray.remote
+    class _WorkspaceSearchWorker:
+        def __init__(
+            self,
+            *,
+            retarget_template: dict[str, Any],
+            ik_config: dict[str, Any],
+            loaded_samples: list[dict[str, Any]],
+            local_mount: str | None,
+            oss_prefix: str,
+        ) -> None:
+            if local_mount:
+                configure_path_mapping(local_mount, oss_prefix)
+            self._retarget_template = copy.deepcopy(retarget_template)
+            self._ik_process = InverseKinematicsProcess(copy.deepcopy(ik_config))
+            self._loaded_samples = loaded_samples
+
+        def evaluate_batch(
+            self,
+            *,
+            workspace_centers: list[list[float]],
+            retarget_scheme: str,
+            objective: str,
+            threshold: float,
+        ) -> list[dict[str, Any]]:
+            return _evaluate_workspace_centers_batch(
+                loaded_samples=self._loaded_samples,
+                retarget_template=self._retarget_template,
+                ik_process=self._ik_process,
+                workspace_centers=workspace_centers,
+                retarget_scheme=retarget_scheme,
+                objective=objective,
+                threshold=threshold,
+            )
+
+
+def _evaluate_workspace_centers_with_ray(
+    *,
+    loaded_samples: list[dict[str, Any]],
+    retarget_template: dict[str, Any],
+    ik_config: dict[str, Any],
+    workspace_centers: list[list[float]],
+    retarget_scheme: str,
+    objective: str,
+    threshold: float,
+    num_workers: int,
+    batch_size: int,
+    local_mount: str | None,
+    oss_prefix: str,
+    ray_address: str | None,
+) -> list[dict[str, Any]]:
+    if ray is None:
+        raise ModuleNotFoundError("ray is required for parallel grid search. Install it with `python -m pip install ray`.")
+
+    worker_count = max(1, int(num_workers))
+    batches = _batched_workspace_centers(workspace_centers, batch_size=max(1, int(batch_size)))
+    if not batches:
+        return []
+
+    ray.init(address=ray_address, ignore_reinit_error=True)
+    try:
+        loaded_samples_ref = ray.put(loaded_samples)
+        workers = [
+            _WorkspaceSearchWorker.options(num_cpus=1).remote(
+                retarget_template=copy.deepcopy(retarget_template),
+                ik_config=copy.deepcopy(ik_config),
+                loaded_samples=loaded_samples_ref,
+                local_mount=local_mount,
+                oss_prefix=oss_prefix,
+            )
+            for _ in range(worker_count)
+        ]
+
+        pending_refs: dict[Any, tuple[int, Any]] = {}
+        next_batch_index = 0
+        for worker in workers:
+            if next_batch_index >= len(batches):
+                break
+            batch = batches[next_batch_index]
+            pending_refs[
+                worker.evaluate_batch.remote(
+                    workspace_centers=batch,
+                    retarget_scheme=retarget_scheme,
+                    objective=objective,
+                    threshold=threshold,
+                )
+            ] = (next_batch_index, worker)
+            next_batch_index += 1
+
+        ordered_results: list[list[dict[str, Any]] | None] = [None] * len(batches)
+        completed = 0
+        total = len(workspace_centers)
+        while pending_refs:
+            ready_refs, _ = ray.wait(list(pending_refs.keys()), num_returns=1)
+            ready_ref = ready_refs[0]
+            batch_index, worker = pending_refs.pop(ready_ref)
+            batch_results = ray.get(ready_ref)
+            ordered_results[batch_index] = batch_results
+            for result in batch_results:
+                completed += 1
+                _print_progress(index=completed, total=total, result=result)
+
+            if next_batch_index < len(batches):
+                next_batch = batches[next_batch_index]
+                pending_refs[
+                    worker.evaluate_batch.remote(
+                        workspace_centers=next_batch,
+                        retarget_scheme=retarget_scheme,
+                        objective=objective,
+                        threshold=threshold,
+                    )
+                ] = (next_batch_index, worker)
+                next_batch_index += 1
+
+        flattened: list[dict[str, Any]] = []
+        for batch_results in ordered_results:
+            if batch_results:
+                flattened.extend(batch_results)
+        return flattened
+    finally:
+        ray.shutdown()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Grid search workspace_center[x, z] by IK reachable_ratio.")
     parser.add_argument(
@@ -281,6 +475,12 @@ def main() -> None:
         help="Workspace center y. Defaults to retarget config value.",
     )
     parser.add_argument(
+        "--retarget-scheme",
+        type=str,
+        default="test",
+        help="Retarget scheme passed into RetargetProcess. Defaults to 'test'.",
+    )
+    parser.add_argument(
         "--objective",
         choices=("pass_ratio", "min", "mean", "left", "right"),
         default="pass_ratio",
@@ -316,6 +516,24 @@ def main() -> None:
         default="oss://",
         help="Optional path mapping oss_prefix for oss:// inputs.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=max(1, os.cpu_count() or 1),
+        help="Parallel Ray workers for workspace search. Use 1 to run serially.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="How many workspace centers each Ray task evaluates before returning.",
+    )
+    parser.add_argument(
+        "--ray-address",
+        type=str,
+        default=None,
+        help="Optional Ray cluster address. Defaults to starting a local Ray instance.",
+    )
     args = parser.parse_args()
     if args.input_dir is None and not args.data_path:
         raise ValueError("either --input-dir or --data-path is required")
@@ -330,6 +548,8 @@ def main() -> None:
 
     load_process = LoadDataProcess(copy.deepcopy(process_configs["load_data"]))
     retarget_config = copy.deepcopy(process_configs["retarget"])
+    retarget_config.setdefault("params", {})
+    retarget_config["params"]["retarget_scheme"] = str(args.retarget_scheme).strip().lower() or "test"
     ik_process = InverseKinematicsProcess(copy.deepcopy(process_configs["inverse_kinematics"]))
 
     base_workspace_center = list(retarget_config.get("params", {}).get("workspace_center", [0.25, 0.0, 0.4]))
@@ -344,30 +564,38 @@ def main() -> None:
 
     x_values = _build_axis_values(args.x_min, args.x_max, args.x_step)
     z_values = _build_axis_values(args.z_min, args.z_max, args.z_step)
-    total = len(x_values) * len(z_values)
+    workspace_centers = _build_workspace_centers(x_values=x_values, workspace_y=workspace_y, z_values=z_values)
+    total = len(workspace_centers)
 
-    results: list[dict[str, Any]] = []
-    index = 0
-    for x_value in x_values:
-        for z_value in z_values:
-            index += 1
-            workspace_center = [float(x_value), float(workspace_y), float(z_value)]
+    if int(args.num_workers) > 1:
+        results = _evaluate_workspace_centers_with_ray(
+            loaded_samples=loaded_samples,
+            retarget_template=retarget_config,
+            ik_config=copy.deepcopy(process_configs["inverse_kinematics"]),
+            workspace_centers=workspace_centers,
+            retarget_scheme=str(args.retarget_scheme),
+            objective=str(args.objective),
+            threshold=float(args.threshold),
+            num_workers=int(args.num_workers),
+            batch_size=int(args.batch_size),
+            local_mount=args.local_mount,
+            oss_prefix=str(args.oss_prefix),
+            ray_address=args.ray_address,
+        )
+    else:
+        results = []
+        for index, workspace_center in enumerate(workspace_centers, start=1):
             result = _evaluate_workspace_center(
                 loaded_samples=loaded_samples,
                 retarget_template=retarget_config,
                 ik_process=ik_process,
                 workspace_center=workspace_center,
+                retarget_scheme=str(args.retarget_scheme),
                 objective=str(args.objective),
                 threshold=float(args.threshold),
             )
             results.append(result)
-            print(
-                f"[{index}/{total}] workspace_center={workspace_center} "
-                f"objective={result['objective']} "
-                f"pass_ratio={result['pass_ratio']} "
-                f"left_mean={result['left_reachable_ratio_mean']} "
-                f"right_mean={result['right_reachable_ratio_mean']}"
-            )
+            _print_progress(index=index, total=total, result=result)
 
     valid_results = [item for item in results if item.get("objective") is not None]
     if not valid_results:
@@ -404,6 +632,7 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "process_config": str(process_config_path),
+            "retarget_scheme": str(args.retarget_scheme),
             "objective": str(args.objective),
             "threshold": float(args.threshold),
             "workspace_y": float(workspace_y),

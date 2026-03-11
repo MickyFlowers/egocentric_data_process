@@ -16,7 +16,7 @@
   enabled: true
   params:
     output_dir: *shared_output_dir
-    retarget_scheme: pinch_plane
+    retarget_scheme: test
     axis_length: 0.03
     workspace_center: [0.25, 0.0, 0.1]
     camera_elevation_deg: 45.0

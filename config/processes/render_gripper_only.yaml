@@ -1,0 +1,36 @@
+- name: render_gripper_only
+  type: render_gripper_only
+  enabled: true
+  params:
+    output_dir: &render_output_dir
+      local: ./outputs
+      remote: ./outputs
+    urdf_path: ./assets/aloha_new_description/urdf/piper_link3_gripper.urdf
+    target_short_side: 512
+    genesis_backend: cpu
+    default_fov_deg: 55.0
+    camera_near: 0.001
+    camera_far: 10.0
+    randomize_clip_light: false
+    light_seed: 0
+    ambient_light: [0.08, 0.08, 0.08]
+    clip_light_xy_range: [0.16, 0.12]
+    clip_light_height_range: [0.20, 0.34]
+    clip_light_intensity_range: [18.0, 30.0]
+    render_height: null
+    render_width: null
+    left_base_translation: [0.0, 0.3, 0.0]
+    right_base_translation: [0.0, -0.3, 0.0]
+    hold_invalid_tcp_pose: true
+    use_gripper_signal: true
+    gripper_open_max: 0.04
+    randomize_non_gripper_joints: true
+    non_gripper_joint_names: [joint4, joint5, joint6]
+    non_gripper_joint_ranges:
+      joint4: [-1.832, 1.832]
+      joint5: [-1.22, 1.22]
+      joint6: [-3.14, 3.14]
+    randomize_initial_joint_positions: true
+    random_joint_max_step: [0.08, 0.08, 0.12]
+    random_joint_acceleration_std: [0.02, 0.02, 0.03]
+    random_joint_seed: 0

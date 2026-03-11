@@ -1,0 +1,15 @@
+defaults:
+  - data: processed_loader
+  - runtime: default
+  - processes: render_gripper_only
+  - _self_
+
+runtime:
+  manifest_path: ./manifest_render_gripper_only.json
+  cleanup_artifacts_on_reset: false
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ./workspace/hydra/${now:%Y-%m-%d_%H-%M-%S}
