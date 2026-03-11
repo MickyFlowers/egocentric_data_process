@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
+from tqdm import tqdm
 
 if __package__ in {None, ""}:
     import sys
@@ -19,7 +22,11 @@ from process.inverse_kinematics_process import InverseKinematicsProcess
 from process.load_data_process import LoadDataProcess
 from process.retarget_process import RetargetProcess
 from utils.oss_utils import configure_path_mapping
+
 project_root = Path(__file__).resolve().parents[1]
+_WORKER_LOADED_SAMPLES: list[dict[str, Any]] | None = None
+_WORKER_RETARGET_TEMPLATE: dict[str, Any] | None = None
+_WORKER_IK_PROCESS: InverseKinematicsProcess | None = None
 
 def _load_process_configs(config_path: Path) -> dict[str, dict[str, Any]]:
     with open(config_path, "r", encoding="utf-8") as file_obj:
@@ -91,6 +98,100 @@ def _compute_objective(left_ratio: float | None, right_ratio: float | None, obje
     if objective == "min":
         return float(min(left_ratio, right_ratio))
     raise ValueError(f"unsupported objective: {objective}")
+
+
+def _evaluate_ik_payload(
+    *,
+    sample_id: str,
+    ik_payload: Any,
+    objective: str,
+    threshold: float,
+) -> dict[str, Any]:
+    ik_section = ik_payload.get("ik", {}) if isinstance(ik_payload, dict) else {}
+    left_ratio = _safe_float(
+        ((ik_section.get("left") or {}) if isinstance(ik_section, dict) else {}).get("reachable_ratio")
+    )
+    right_ratio = _safe_float(
+        ((ik_section.get("right") or {}) if isinstance(ik_section, dict) else {}).get("reachable_ratio")
+    )
+    passed = bool(
+        left_ratio is not None
+        and right_ratio is not None
+        and left_ratio > threshold
+        and right_ratio > threshold
+    )
+    if objective == "pass_ratio":
+        score = 1.0 if passed else 0.0
+    else:
+        score = _compute_objective(left_ratio, right_ratio, objective)
+    return {
+        "sample_id": str(sample_id),
+        "left_reachable_ratio": left_ratio,
+        "right_reachable_ratio": right_ratio,
+        "passed_threshold": passed,
+        "objective": score,
+    }
+
+
+def _evaluate_loaded_sample(
+    *,
+    loaded_sample: dict[str, Any],
+    retarget_process: RetargetProcess,
+    ik_process: InverseKinematicsProcess,
+    objective: str,
+    threshold: float,
+) -> dict[str, Any]:
+    current = retarget_process(dict(loaded_sample), context=None)
+    current = ik_process(current, context=None)
+    return _evaluate_ik_payload(
+        sample_id=str(loaded_sample["sample_id"]),
+        ik_payload=current.get("ik", {}),
+        objective=objective,
+        threshold=threshold,
+    )
+
+
+def _init_worker(
+    loaded_samples: list[dict[str, Any]],
+    retarget_template: dict[str, Any],
+    ik_config: dict[str, Any],
+    local_mount: str | None,
+    oss_prefix: str,
+) -> None:
+    global _WORKER_LOADED_SAMPLES, _WORKER_RETARGET_TEMPLATE, _WORKER_IK_PROCESS
+
+    if local_mount:
+        configure_path_mapping(local_mount, oss_prefix)
+    _WORKER_LOADED_SAMPLES = loaded_samples
+    _WORKER_RETARGET_TEMPLATE = copy.deepcopy(retarget_template)
+    _WORKER_IK_PROCESS = InverseKinematicsProcess(copy.deepcopy(ik_config))
+
+
+def _evaluate_workspace_center_sample_task(
+    workspace_center: list[float],
+    sample_index: int,
+    objective: str,
+    threshold: float,
+) -> dict[str, Any]:
+    if _WORKER_LOADED_SAMPLES is None or _WORKER_RETARGET_TEMPLATE is None or _WORKER_IK_PROCESS is None:
+        raise RuntimeError("worker is not initialized")
+
+    retarget_config = copy.deepcopy(_WORKER_RETARGET_TEMPLATE)
+    retarget_config.setdefault("params", {})
+    retarget_config["params"]["workspace_center"] = [
+        float(workspace_center[0]),
+        float(workspace_center[1]),
+        float(workspace_center[2]),
+    ]
+    retarget_process = RetargetProcess(retarget_config)
+    loaded_sample = _WORKER_LOADED_SAMPLES[sample_index]
+    return _evaluate_loaded_sample(
+        loaded_sample=loaded_sample,
+        retarget_process=retarget_process,
+        ik_process=_WORKER_IK_PROCESS,
+        objective=objective,
+        threshold=threshold,
+    )
 
 
 def _collect_data_paths_from_input_dir(input_dir: str) -> list[str]:
@@ -165,58 +266,46 @@ def _evaluate_workspace_center(
     retarget_config["params"]["workspace_center"] = workspace_center
     retarget_process = RetargetProcess(retarget_config)
 
-    sample_results: list[dict[str, Any]] = []
+    sample_results: list[dict[str, Any]] = [
+        _evaluate_loaded_sample(
+            loaded_sample=loaded_sample,
+            retarget_process=retarget_process,
+            ik_process=ik_process,
+            objective=objective,
+            threshold=threshold,
+        )
+        for loaded_sample in loaded_samples
+    ]
+    return _aggregate_workspace_center_results(
+        workspace_center=workspace_center,
+        sample_results=sample_results,
+        threshold=threshold,
+    )
+
+
+def _aggregate_workspace_center_results(
+    *,
+    workspace_center: list[float],
+    sample_results: list[dict[str, Any]],
+    threshold: float,
+) -> dict[str, Any]:
     objective_values: list[float] = []
     left_values: list[float] = []
     right_values: list[float] = []
     pass_count = 0
 
-    for loaded_sample in loaded_samples:
-        current = retarget_process(dict(loaded_sample), context=None)
-        current = ik_process(current, context=None)
-        ik_payload = current.get("ik", {})
-        ik_section = ik_payload.get("ik", {}) if isinstance(ik_payload, dict) else {}
-        left_ratio = _safe_float(
-            ((ik_section.get("left") or {}) if isinstance(ik_section, dict) else {}).get("reachable_ratio")
-        )
-        right_ratio = _safe_float(
-            ((ik_section.get("right") or {}) if isinstance(ik_section, dict) else {}).get("reachable_ratio")
-        )
-        if objective == "pass_ratio":
-            passed = bool(
-                left_ratio is not None
-                and right_ratio is not None
-                and left_ratio > threshold
-                and right_ratio > threshold
-            )
-            score = 1.0 if passed else 0.0
-        else:
-            passed = bool(
-                left_ratio is not None
-                and right_ratio is not None
-                and left_ratio > threshold
-                and right_ratio > threshold
-            )
-            score = _compute_objective(left_ratio, right_ratio, objective)
-
+    for sample_result in sample_results:
+        left_ratio = _safe_float(sample_result.get("left_reachable_ratio"))
+        right_ratio = _safe_float(sample_result.get("right_reachable_ratio"))
+        score = _safe_float(sample_result.get("objective"))
         if left_ratio is not None:
             left_values.append(left_ratio)
         if right_ratio is not None:
             right_values.append(right_ratio)
         if score is not None:
             objective_values.append(score)
-        if passed:
+        if bool(sample_result.get("passed_threshold", False)):
             pass_count += 1
-
-        sample_results.append(
-            {
-                "sample_id": str(loaded_sample["sample_id"]),
-                "left_reachable_ratio": left_ratio,
-                "right_reachable_ratio": right_ratio,
-                "passed_threshold": passed,
-                "objective": score,
-            }
-        )
 
     pass_ratio = float(pass_count / len(sample_results)) if sample_results else None
     return {
@@ -231,6 +320,95 @@ def _evaluate_workspace_center(
         "right_reachable_ratio_mean": float(np.mean(right_values)) if right_values else None,
         "samples": sample_results,
     }
+
+
+def _print_progress(
+    *,
+    index: int,
+    total: int,
+    result: dict[str, Any],
+) -> None:
+    print(
+        f"[{index}/{total}] workspace_center={result['workspace_center']} "
+        f"objective={result['objective']} "
+        f"pass_ratio={result['pass_ratio']} "
+        f"left_mean={result['left_reachable_ratio_mean']} "
+        f"right_mean={result['right_reachable_ratio_mean']}"
+    )
+
+
+def _evaluate_workspace_centers_parallel(
+    *,
+    loaded_samples: list[dict[str, Any]],
+    retarget_template: dict[str, Any],
+    ik_config: dict[str, Any],
+    workspace_centers: list[list[float]],
+    objective: str,
+    threshold: float,
+    num_workers: int,
+    local_mount: str | None,
+    oss_prefix: str,
+) -> list[dict[str, Any]]:
+    if not workspace_centers:
+        return []
+
+    sample_count = len(loaded_samples)
+    center_keys = [tuple(float(value) for value in workspace_center) for workspace_center in workspace_centers]
+    partial_results = {key: [None] * sample_count for key in center_keys}
+    partial_counts = {key: 0 for key in center_keys}
+    aggregated_results: dict[tuple[float, float, float], dict[str, Any]] = {}
+
+    with ProcessPoolExecutor(
+        max_workers=max(1, int(num_workers)),
+        initializer=_init_worker,
+        initargs=(
+            loaded_samples,
+            retarget_template,
+            ik_config,
+            local_mount,
+            oss_prefix,
+        ),
+    ) as executor:
+        future_to_task: dict[Any, tuple[tuple[float, float, float], int]] = {}
+        for workspace_center, center_key in zip(workspace_centers, center_keys):
+            for sample_index in range(sample_count):
+                future = executor.submit(
+                    _evaluate_workspace_center_sample_task,
+                    list(workspace_center),
+                    sample_index,
+                    str(objective),
+                    float(threshold),
+                )
+                future_to_task[future] = (center_key, sample_index)
+
+        total_tasks = len(workspace_centers) * sample_count
+        total_centers = len(workspace_centers)
+        completed_center_count = 0
+        pbar = tqdm(total=total_tasks, desc="grid search", unit="task")
+        for future in as_completed(future_to_task):
+            center_key, sample_index = future_to_task[future]
+            sample_result = future.result()
+            partial_results[center_key][sample_index] = sample_result
+            partial_counts[center_key] += 1
+            pbar.update(1)
+            if partial_counts[center_key] != sample_count:
+                continue
+
+            workspace_center = [float(center_key[0]), float(center_key[1]), float(center_key[2])]
+            aggregated = _aggregate_workspace_center_results(
+                workspace_center=workspace_center,
+                sample_results=[
+                    item for item in partial_results[center_key]
+                    if item is not None
+                ],
+                threshold=float(threshold),
+            )
+            aggregated_results[center_key] = aggregated
+            completed_center_count += 1
+            pbar.set_postfix(centers=f"{completed_center_count}/{total_centers}", obj=aggregated.get("objective"))
+        pbar.close()
+
+    return [aggregated_results[key] for key in center_keys if key in aggregated_results]
 
 
 def main() -> None:
@@ -316,6 +494,12 @@ def main() -> None:
         default="oss://",
         help="Optional path mapping oss_prefix for oss:// inputs.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=max(1, os.cpu_count() or 1),
+        help="Process workers. Use 1 to run serially.",
+    )
     args = parser.parse_args()
     if args.input_dir is None and not args.data_path:
         raise ValueError("either --input-dir or --data-path is required")
@@ -344,14 +528,28 @@ def main() -> None:
 
     x_values = _build_axis_values(args.x_min, args.x_max, args.x_step)
     z_values = _build_axis_values(args.z_min, args.z_max, args.z_step)
-    total = len(x_values) * len(z_values)
+    workspace_centers = [
+        [float(x_value), float(workspace_y), float(z_value)]
+        for x_value in x_values
+        for z_value in z_values
+    ]
 
-    results: list[dict[str, Any]] = []
-    index = 0
-    for x_value in x_values:
-        for z_value in z_values:
-            index += 1
-            workspace_center = [float(x_value), float(workspace_y), float(z_value)]
+    if int(args.num_workers) > 1:
+        results = _evaluate_workspace_centers_parallel(
+            loaded_samples=loaded_samples,
+            retarget_template=retarget_config,
+            ik_config=copy.deepcopy(process_configs["inverse_kinematics"]),
+            workspace_centers=workspace_centers,
+            objective=str(args.objective),
+            threshold=float(args.threshold),
+            num_workers=int(args.num_workers),
+            local_mount=args.local_mount,
+            oss_prefix=str(args.oss_prefix),
+        )
+    else:
+        results = []
+        pbar = tqdm(workspace_centers, desc="grid search", unit="center")
+        for workspace_center in pbar:
             result = _evaluate_workspace_center(
                 loaded_samples=loaded_samples,
                 retarget_template=retarget_config,
@@ -361,13 +559,7 @@ def main() -> None:
                 threshold=float(args.threshold),
             )
             results.append(result)
-            print(
-                f"[{index}/{total}] workspace_center={workspace_center} "
-                f"objective={result['objective']} "
-                f"pass_ratio={result['pass_ratio']} "
-                f"left_mean={result['left_reachable_ratio_mean']} "
-                f"right_mean={result['right_reachable_ratio_mean']}"
-            )
+            pbar.set_postfix(obj=result.get("objective"), pass_ratio=result.get("pass_ratio"))
 
     valid_results = [item for item in results if item.get("objective") is not None]
     if not valid_results:
