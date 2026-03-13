@@ -29,7 +29,7 @@ def _update_sample(
     result = {
         'agilex_ik_result_data_path': data_path,
         'agilex_ik_result_meta_data_path': load_meta_data_path,
-        'agilex_rendered_video_path': render_video_path if sample_id in render_sample_ids else None,
+        'agilex_render_video_path': render_video_path if sample_id in render_sample_ids else None,
     }
 
     database.table(database_table).update(result).eq("path", path).execute()
